@@ -1,114 +1,146 @@
 import Groq from 'groq-sdk';
 
-let groq;
+// ─── Multi-key pool ───────────────────────────────────────────────────────────
+// Set GROQ_API_KEYS as comma-separated keys in Vercel env vars for unlimited usage
+// e.g. GROQ_API_KEYS=key1,key2,key3
+// Falls back to single GROQ_API_KEY if GROQ_API_KEYS not set
+const GROQ_KEYS = (process.env.GROQ_API_KEYS || process.env.GROQ_API_KEY || '')
+  .split(',').map(k => k.trim()).filter(Boolean);
 
-function getGroqClient() {
-  if (!groq) {
-    const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) throw new Error('[SEOS] Missing GROQ_API_KEY environment variable');
-    groq = new Groq({ apiKey });
+const GEMINI_KEYS = (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '')
+  .split(',').map(k => k.trim()).filter(Boolean);
+
+if (GROQ_KEYS.length === 0) console.error('[AI] No Groq API keys configured!');
+
+// Lazy-init Groq clients, one per key
+const groqClients = GROQ_KEYS.map(key => new Groq({ apiKey: key }));
+
+// Track rate-limited keys: index -> expiry timestamp
+const rateLimitedUntil = {};
+let groqRoundRobin = 0;
+
+function getAvailableGroqClient() {
+  const now = Date.now();
+  for (let i = 0; i < groqClients.length; i++) {
+    const idx = (groqRoundRobin + i) % groqClients.length;
+    if (!rateLimitedUntil[idx] || rateLimitedUntil[idx] < now) {
+      groqRoundRobin = (idx + 1) % groqClients.length;
+      return { client: groqClients[idx], idx };
+    }
   }
-  return groq;
+  // All rate limited — return the soonest-available
+  const soonest = Object.entries(rateLimitedUntil).sort(([, a], [, b]) => a - b)[0];
+  const idx = parseInt(soonest[0]);
+  return { client: groqClients[idx], idx };
 }
 
-// Primary: llama-3.1-8b-instant — 500K TPD (5x more than 70b), faster
-// Fallback: llama3-70b-8192 — different quota pool on Groq
-// Last resort: Google Gemini Flash — separate provider, 1M tokens/day free
-const PRIMARY_MODEL = 'llama-3.1-8b-instant';
-const FALLBACK_MODEL = 'llama3-70b-8192';
+// ─── Gemini fallback ──────────────────────────────────────────────────────────
+let geminiRoundRobin = 0;
 
-/**
- * Generate response via Google Gemini as last-resort fallback.
- */
 async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('[SEOS] No GEMINI_API_KEY set for fallback');
+  if (GEMINI_KEYS.length === 0) throw new Error('[AI] No Gemini API keys configured');
 
-  const contents = [
-    ...messages.map(m => ({
+  for (let attempt = 0; attempt < GEMINI_KEYS.length; attempt++) {
+    const idx = (geminiRoundRobin + attempt) % GEMINI_KEYS.length;
+    const apiKey = GEMINI_KEYS[idx];
+
+    const contents = messages.map(m => ({
       role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: m.content }],
-    })),
-  ];
+    }));
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: systemPrompt }] },
-        contents,
-        generationConfig: { temperature, maxOutputTokens: 2048 },
-      }),
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            system_instruction: { parts: [{ text: systemPrompt }] },
+            contents,
+            generationConfig: { temperature, maxOutputTokens: 2048 },
+          }),
+        }
+      );
+
+      if (response.status === 429) {
+        console.warn(`[Gemini] Key ${idx} rate limited, trying next...`);
+        geminiRoundRobin = (idx + 1) % GEMINI_KEYS.length;
+        continue;
+      }
+
+      if (!response.ok) {
+        const err = await response.text();
+        throw new Error(`Gemini error ${response.status}: ${err}`);
+      }
+
+      const data = await response.json();
+      geminiRoundRobin = (idx + 1) % GEMINI_KEYS.length;
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    } catch (err) {
+      if (attempt === GEMINI_KEYS.length - 1) throw err;
     }
-  );
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`Gemini API error ${response.status}: ${err}`);
   }
-
-  const data = await response.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  throw new Error('[AI] All Gemini keys exhausted');
 }
 
-/**
- * Generate an AI response — tries Groq first, falls back to Gemini on rate limit.
- */
+// ─── Main generate function ───────────────────────────────────────────────────
+const PRIMARY_MODEL = 'llama-3.1-8b-instant'; // 500K TPD free, blazing fast
+const FALLBACK_MODEL = 'llama3-70b-8192';      // separate quota pool
+
 export async function generateResponse(systemPrompt, messages, options = {}) {
-  const { model = PRIMARY_MODEL, temperature = 0.7, max_tokens = 2048 } = options;
+  const { model = PRIMARY_MODEL, temperature = 0.7, max_tokens = 1500 } = options;
 
   const fullMessages = [
     { role: 'system', content: systemPrompt },
     ...messages,
   ];
 
-  // Try primary Groq model
+  // Try each available Groq key in rotation
+  for (let attempt = 0; attempt < Math.max(GROQ_KEYS.length, 1); attempt++) {
+    const { client, idx } = getAvailableGroqClient();
+
+    try {
+      const completion = await client.chat.completions.create({
+        model,
+        messages: fullMessages,
+        temperature,
+        max_tokens,
+      });
+      return completion.choices[0]?.message?.content || '';
+    } catch (error) {
+      if (error.status === 429 || error.status === 503) {
+        // Parse reset time from error if available, default 1 hour
+        const resetMs = 60 * 60 * 1000;
+        rateLimitedUntil[idx] = Date.now() + resetMs;
+        console.warn(`[Groq] Key ${idx} (${model}) rate limited, rotating...`);
+        continue;
+      }
+      console.error('[Groq] Error:', error.message);
+      throw error;
+    }
+  }
+
+  // All Groq keys exhausted for primary model — try fallback model
+  console.warn('[Groq] All keys rate limited on primary model, trying fallback model...');
+  const { client: fbClient, idx: fbIdx } = getAvailableGroqClient();
   try {
-    const completion = await getGroqClient().chat.completions.create({
-      model,
+    const completion = await fbClient.chat.completions.create({
+      model: FALLBACK_MODEL,
       messages: fullMessages,
       temperature,
       max_tokens,
     });
     return completion.choices[0]?.message?.content || '';
-  } catch (error) {
-    if (error.status === 429 || error.status === 503) {
-      console.warn(`[Groq] ${model} rate limited, trying fallback model...`);
-      // Try fallback Groq model (different quota pool)
-      try {
-        const completion = await getGroqClient().chat.completions.create({
-          model: FALLBACK_MODEL,
-          messages: fullMessages,
-          temperature,
-          max_tokens,
-        });
-        console.log('[Groq] Fallback model succeeded');
-        return completion.choices[0]?.message?.content || '';
-      } catch (fallbackError) {
-        if (fallbackError.status === 429 || fallbackError.status === 503) {
-          console.warn('[Groq] Fallback also rate limited, switching to Gemini...');
-          try {
-            const reply = await generateWithGemini(systemPrompt, messages, temperature);
-            console.log('[Gemini] Fallback succeeded');
-            return reply;
-          } catch (geminiError) {
-            console.error('[Gemini] Fallback failed:', geminiError.message);
-            throw new Error('All AI providers are currently rate limited. Please try again in a few minutes.');
-          }
-        }
-        throw fallbackError;
-      }
+  } catch (fallbackError) {
+    if (fallbackError.status === 429 || fallbackError.status === 503) {
+      console.warn('[Groq] Fallback model also limited, switching to Gemini...');
+      return await generateWithGemini(systemPrompt, messages, temperature);
     }
-    console.error('[Groq] API Error:', error.message);
-    throw error;
+    throw fallbackError;
   }
 }
 
-/**
- * Generate a structured JSON extraction from text.
- */
 export async function generateStructuredExtraction(prompt) {
   return generateResponse(
     'You are a precise data extraction tool. Always respond with valid JSON only, no additional text.',

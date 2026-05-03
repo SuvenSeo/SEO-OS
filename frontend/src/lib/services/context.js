@@ -1,5 +1,18 @@
 import supabase from '../config/supabase.js';
 
+// ─── Simple in-memory cache ───────────────────────────────────────────────────
+const _cache = {};
+function getCache(key) {
+  const e = _cache[key];
+  return e && Date.now() < e.exp ? e.val : null;
+}
+function setCache(key, val, ttlMs) {
+  _cache[key] = { val, exp: Date.now() + ttlMs };
+}
+
+const TTL_5MIN  = 5  * 60 * 1000;
+const TTL_1MIN  = 1  * 60 * 1000;
+
 /**
  * Build the full dynamic context for the AI brain.
  * Called before every Groq API call to inject current state.
@@ -13,22 +26,39 @@ async function buildContext(userMessage = '') {
   // 0. Current Date/Time
   sections.push(`CURRENT DATE/TIME: ${now.toISOString()} (Sri Lanka: ${now.toLocaleString('en-US', { timeZone: 'Asia/Colombo' })})`);
 
-  // Run all DB queries in parallel
+  // Run all DB queries in parallel — cached where data rarely changes
+  const cachedCore    = getCache('core_memory');
+  const cachedPatterns = getCache('patterns');
+  const cachedIdeas   = getCache('ideas');
+
+  const promises = [
+    // Always fresh: episodic memory (last 10 — reduced from 30 for speed/tokens)
+    supabase.from('episodic_memory').select('role, content, created_at').order('created_at', { ascending: false }).limit(10),
+    // Always fresh: open tasks
+    supabase.from('tasks').select('id, title, description, deadline, priority, status, follow_up_count, tier').in('status', ['open', 'snoozed']).order('priority', { ascending: true }),
+    // Cached 1 min: working memory
+    supabase.from('working_memory').select('key, value, expires_at').or(`expires_at.is.null,expires_at.gt.${now.toISOString()}`),
+    // Cached 5 min: core memory
+    cachedCore    ? Promise.resolve({ data: cachedCore })    : supabase.from('core_memory').select('key, value').order('key'),
+    // Cached 5 min: patterns
+    cachedPatterns ? Promise.resolve({ data: cachedPatterns }) : supabase.from('patterns').select('observation, confidence').order('created_at', { ascending: false }).limit(8),
+    // Cached 5 min: raw ideas
+    cachedIdeas   ? Promise.resolve({ data: cachedIdeas })   : supabase.from('ideas').select('content').eq('status', 'raw').order('created_at', { ascending: false }).limit(5),
+  ];
+
   const [
     { data: episodes },
     { data: tasks },
-    { data: coreMemory },
     { data: workingMemory },
+    { data: coreMemory },
     { data: patterns },
     { data: ideas },
-  ] = await Promise.all([
-    supabase.from('episodic_memory').select('role, content, created_at').order('created_at', { ascending: false }).limit(30),
-    supabase.from('tasks').select('id, title, description, deadline, priority, status, follow_up_count, tier').in('status', ['open', 'snoozed']).order('priority', { ascending: true }),
-    supabase.from('core_memory').select('key, value').order('key'),
-    supabase.from('working_memory').select('key, value, expires_at').or(`expires_at.is.null,expires_at.gt.${now.toISOString()}`),
-    supabase.from('patterns').select('observation, confidence, created_at').order('created_at', { ascending: false }).limit(10),
-    supabase.from('ideas').select('content, created_at').eq('status', 'raw').order('created_at', { ascending: false }).limit(5),
-  ]);
+  ] = await Promise.all(promises);
+
+  // Update caches for slow-changing data
+  if (!cachedCore     && coreMemory)  setCache('core_memory', coreMemory,  TTL_5MIN);
+  if (!cachedPatterns && patterns)    setCache('patterns',    patterns,     TTL_5MIN);
+  if (!cachedIdeas    && ideas)       setCache('ideas',       ideas,        TTL_5MIN);
 
   if (episodes && episodes.length > 0) {
     const history = episodes.reverse().map(e => `[${e.role}] ${e.content}`).join('\n');
@@ -94,10 +124,13 @@ async function buildContext(userMessage = '') {
 }
 
 /**
- * Load the system prompt from agent_config.
+ * Load the system prompt from agent_config — cached for 5 minutes.
  * @returns {Promise<string>}
  */
 async function loadSystemPrompt() {
+  const cached = getCache('system_prompt');
+  if (cached) return cached;
+
   const { data, error } = await supabase
     .from('agent_config')
     .select('value')
@@ -109,6 +142,7 @@ async function loadSystemPrompt() {
     return 'You are SEOS, a personal AI assistant.';
   }
 
+  setCache('system_prompt', data.value, TTL_5MIN);
   return data.value;
 }
 
