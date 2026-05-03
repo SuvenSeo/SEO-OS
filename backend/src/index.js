@@ -37,8 +37,8 @@ app.get('/health', (req, res) => {
 });
 
 // ── Routes ─────────────────────────────────────────────────
-// Telegram webhook (no auth — uses token-in-URL verification)
-app.use('/webhook', telegramRoutes);
+// Telegram webhook (matches setWebhook URL)
+app.use('/api/telegram', telegramRoutes);
 
 // API routes (auth protected)
 app.use('/api/tasks', taskRoutes);

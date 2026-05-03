@@ -7,13 +7,8 @@ const { getFullPrompt } = require('../services/context');
 const { processExchange, formatSummary } = require('../services/postProcessor');
 
 // ── Webhook Handler ────────────────────────────────────────
-// POST /webhook/:token
-router.post('/:token', async (req, res) => {
-  // Verify the token matches our bot token
-  if (req.params.token !== process.env.TELEGRAM_BOT_TOKEN) {
-    return res.status(403).json({ error: 'Invalid token' });
-  }
-
+// POST /api/telegram/webhook
+router.post('/webhook', async (req, res) => {
   // Respond immediately to Telegram (prevent timeout)
   res.status(200).json({ ok: true });
 
