@@ -1,3 +1,12 @@
+---
+title: SEOS
+emoji: 🧠
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+pinned: false
+---
+
 # SEOS — Personal AI Operating System
 
 A private, cloud-hosted AI chief of staff that manages tasks, memory, reminders, and daily life. Maximally proactive — it runs the day, not the other way around.
