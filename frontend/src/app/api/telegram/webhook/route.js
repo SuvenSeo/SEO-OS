@@ -49,8 +49,30 @@ export async function GET(request) {
     }
   }
 
+  if (action === 'test') {
+    try {
+      // Test bot token by calling getMe
+      const response = await fetch(`${TELEGRAM_API}/getMe`);
+      const data = await response.json();
+      
+      return NextResponse.json({
+        botInfo: data,
+        envVars: {
+          chatId: process.env.TELEGRAM_CHAT_ID,
+          hasToken: !!process.env.TELEGRAM_BOT_TOKEN,
+          tokenPrefix: process.env.TELEGRAM_BOT_TOKEN?.substring(0, 10) + '...',
+        }
+      });
+    } catch (error) {
+      return NextResponse.json(
+        { error: 'Failed to test bot', details: error.message },
+        { status: 500 }
+      );
+    }
+  }
+
   return NextResponse.json({
-    usage: 'Use ?action=setWebhook to configure webhook, ?action=getWebhook to check status',
+    usage: 'Use ?action=setWebhook to configure webhook, ?action=getWebhook to check status, ?action=test to verify bot',
   });
 }
 
