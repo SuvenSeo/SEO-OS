@@ -51,16 +51,14 @@ export async function POST(req) {
   try {
     const update = await req.json();
     
-    // Fire and forget - handle async
-    handleTelegramMessage(update).catch(err => {
-      console.error('[Telegram] Async error:', err.message);
-    });
+    // Await the handler - Vercel terminates the function after response is sent
+    // so fire-and-forget does NOT work on serverless
+    await handleTelegramMessage(update);
 
-    // Return immediately to Telegram
     return NextResponse.json({ ok: true });
   } catch (error) {
     console.error('[Telegram] POST error:', error.message);
-    return NextResponse.json({ ok: false }, { status: 200 }); // Still return 200 to prevent retries
+    return NextResponse.json({ ok: true }, { status: 200 });
   }
 }
 
