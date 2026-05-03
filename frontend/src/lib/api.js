@@ -1,4 +1,4 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const API_URL = '';
 const TOKEN = process.env.NEXT_PUBLIC_CRON_SECRET || '';
 
 async function request(path, options = {}) {
