@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
-const supabase = require('../../../../../backend/src/config/supabase');
-const { generateResponse } = require('../../../../../backend/src/services/groq');
-const { sendMessage } = require('../../../../../backend/src/services/telegram');
-const { getFullPrompt } = require('../../../../../backend/src/services/context');
-const { processExchange, formatSummary } = require('../../../../../backend/src/services/postProcessor');
+const supabase = require('../../../../../backend_logic/config/supabase');
+const { generateResponse } = require('../../../../../backend_logic/services/groq');
+const { sendMessage } = require('../../../../../backend_logic/services/telegram');
+const { getFullPrompt } = require('../../../../../backend_logic/services/context');
+const { processExchange, formatSummary } = require('../../../../../backend_logic/services/postProcessor');
 
 export async function POST(req) {
   try {
