@@ -1,0 +1,16 @@
+name: SEOS Self-Audit
+on:
+  schedule:
+    - cron: '30 15 * * 0' # Sunday 9:00pm IST (UTC+5:30)
+  workflow_dispatch:
+
+jobs:
+  self-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Self-Audit
+        run: |
+          curl -X POST "${{ secrets.RAILWAY_URL }}/api/proactive/self-audit" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json" \
+            --fail --silent --show-error

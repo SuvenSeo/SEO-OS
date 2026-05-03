@@ -1,0 +1,16 @@
+name: SEOS Evening Check-in
+on:
+  schedule:
+    - cron: '30 15 * * *' # 9:00pm IST (UTC+5:30)
+  workflow_dispatch:
+
+jobs:
+  evening-checkin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Evening Check-in
+        run: |
+          curl -X POST "${{ secrets.RAILWAY_URL }}/api/proactive/evening-checkin" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json" \
+            --fail --silent --show-error

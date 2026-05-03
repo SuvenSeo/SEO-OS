@@ -1,0 +1,16 @@
+name: SEOS Weekly Review
+on:
+  schedule:
+    - cron: '30 14 * * 0' # Sunday 8:00pm IST (UTC+5:30)
+  workflow_dispatch:
+
+jobs:
+  weekly-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Weekly Review
+        run: |
+          curl -X POST "${{ secrets.RAILWAY_URL }}/api/proactive/weekly-review" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json" \
+            --fail --silent --show-error

@@ -1,0 +1,16 @@
+name: SEOS Reminder Check
+on:
+  schedule:
+    - cron: '*/30 * * * *' # Every 30 minutes
+  workflow_dispatch:
+
+jobs:
+  reminder-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Reminder Check
+        run: |
+          curl -X POST "${{ secrets.RAILWAY_URL }}/api/proactive/reminder-check" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json" \
+            --fail --silent --show-error

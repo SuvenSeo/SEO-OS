@@ -1,0 +1,16 @@
+name: SEOS Morning Brief
+on:
+  schedule:
+    - cron: '30 2 * * *' # 8:00am IST (UTC+5:30)
+  workflow_dispatch:
+
+jobs:
+  morning-brief:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Morning Brief
+        run: |
+          curl -X POST "${{ secrets.RAILWAY_URL }}/api/proactive/morning-brief" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json" \
+            --fail --silent --show-error

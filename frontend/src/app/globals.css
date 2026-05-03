@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+:root {
+  --bg-primary: #0a0a0a;
+  --bg-surface: #111111;
+  --bg-surface-hover: #161616;
+  --bg-elevated: #1a1a1a;
+  --accent: #E83518;
+  --accent-hover: #ff4528;
+  --accent-muted: rgba(232, 53, 24, 0.15);
+  --text-primary: #ffffff;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+  --border: rgba(255, 255, 255, 0.06);
+  --border-hover: rgba(255, 255, 255, 0.12);
+  --glass: rgba(255, 255, 255, 0.03);
+  --danger: #ef4444;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --info: #3b82f6;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-elevated) transparent;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+}
+
+/* Glassmorphism card */
+.glass-card {
+  background: var(--glass);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+
+.glass-card:hover {
+  border-color: var(--border-hover);
+}
+
+/* Accent glow effect */
+.accent-glow {
+  box-shadow: 0 0 30px rgba(232, 53, 24, 0.1);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-elevated);
+  border-radius: 3px;
+}
+
+/* Code/monospace */
+.font-mono {
+  font-family: var(--font-geist-mono), 'JetBrains Mono', monospace;
+}
+
+/* Pulse animation for status indicators */
+@keyframes pulse-accent {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.pulse-accent {
+  animation: pulse-accent 2s ease-in-out infinite;
+}
+
+/* Priority colors */
+.priority-1 { color: #ef4444; }
+.priority-2 { color: #f97316; }
+.priority-3 { color: #f59e0b; }
+.priority-4 { color: #3b82f6; }
+.priority-5 { color: #6b7280; }
+
+.priority-bg-1 { background: rgba(239, 68, 68, 0.15); }
+.priority-bg-2 { background: rgba(249, 115, 22, 0.15); }
+.priority-bg-3 { background: rgba(245, 158, 11, 0.15); }
+.priority-bg-4 { background: rgba(59, 130, 246, 0.15); }
+.priority-bg-5 { background: rgba(107, 114, 128, 0.15); }
