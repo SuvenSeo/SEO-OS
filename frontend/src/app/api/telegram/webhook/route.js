@@ -82,57 +82,51 @@ async function handleUpdate(update) {
 }
 
 async function handleMessage(chatId, text, messageId) {
-  // Save user message
-  await supabase.from('episodic_memory').insert({
-    role: 'user',
-    content: text,
-    telegram_message_id: messageId,
-  });
+  // Run DB writes + context fetch in parallel
+  const [, , systemPrompt, recentResult] = await Promise.all([
+    // Save user message
+    supabase.from('episodic_memory').insert({
+      role: 'user',
+      content: text,
+      telegram_message_id: messageId,
+    }),
+    // Track morning brief reply
+    (async () => {
+      const istHour = parseInt(new Date().toLocaleString('en-US', { timeZone: 'Asia/Colombo', hour: 'numeric', hour12: false }), 10);
+      if (istHour >= 8 && istHour < 11) {
+        await supabase.from('working_memory').upsert(
+          { key: 'morning_brief_replied', value: 'true' },
+          { onConflict: 'key' }
+        );
+      }
+    })(),
+    // Build full context + system prompt
+    getFullPrompt(text),
+    // Fetch recent conversation history
+    supabase.from('episodic_memory').select('role, content').order('created_at', { ascending: false }).limit(20),
+  ]);
 
-  // Track morning brief reply
-  const istHour = parseInt(new Date().toLocaleString('en-US', { timeZone: 'Asia/Colombo', hour: 'numeric', hour12: false }), 10);
-  if (istHour >= 8 && istHour < 11) {
-    await supabase.from('working_memory').upsert(
-      { key: 'morning_brief_replied', value: 'true' },
-      { onConflict: 'key' }
-    );
-  }
-
-  // Build full context + system prompt
-  const systemPrompt = await getFullPrompt(text);
-
-  // Get recent conversation history
-  const { data: recentMessages } = await supabase
-    .from('episodic_memory')
-    .select('role, content')
-    .order('created_at', { ascending: false })
-    .limit(20);
-
-  const messages = (recentMessages || [])
+  const messages = (recentResult.data || [])
     .reverse()
     .map(m => ({ role: m.role, content: m.content }));
 
   // Generate AI response
   const aiResponse = await generateResponse(systemPrompt, messages);
 
-  // Save AI response
-  await supabase.from('episodic_memory').insert({
-    role: 'assistant',
-    content: aiResponse,
-  });
-
-  // Run post-processor to extract tasks/reminders/ideas
-  let summaryText = '';
-  try {
-    const summary = await processExchange(text, aiResponse);
-    summaryText = formatSummary(summary);
-  } catch (err) {
-    console.error('[Telegram] Post-processor error:', err.message);
-  }
-
-  // Send reply
-  await sendMessage(chatId, aiResponse + summaryText);
+  // Send reply FIRST — user sees it immediately
+  await sendMessage(chatId, aiResponse);
   console.log('[Telegram] AI response sent');
+
+  // Save AI response + post-process in background (user already has reply)
+  await Promise.all([
+    supabase.from('episodic_memory').insert({ role: 'assistant', content: aiResponse }),
+    processExchange(text, aiResponse).then(summary => {
+      const summaryText = formatSummary(summary);
+      if (summaryText.trim()) {
+        return sendMessage(chatId, summaryText);
+      }
+    }).catch(err => console.error('[Telegram] Post-processor error:', err.message)),
+  ]);
 }
 
 async function handleCommand(chatId, text, messageId) {
