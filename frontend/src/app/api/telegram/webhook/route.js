@@ -5,6 +5,55 @@ import { sendMessage } from '@/lib/services/telegram';
 import { getFullPrompt } from '@/lib/services/context';
 import { processExchange, formatSummary } from '@/lib/services/postProcessor';
 
+const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
+
+// GET /api/telegram/webhook - Set the webhook URL
+export async function GET(request) {
+  const { searchParams } = new URL(request.url);
+  const action = searchParams.get('action');
+
+  if (action === 'setWebhook') {
+    try {
+      const webhookUrl = `https://${request.headers.get('host')}/api/telegram/webhook`;
+
+      const response = await fetch(`${TELEGRAM_API}/setWebhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: webhookUrl }),
+      });
+
+      const data = await response.json();
+      return NextResponse.json({
+        success: data.ok,
+        message: data.description || 'Webhook configured',
+        webhookUrl,
+      });
+    } catch (error) {
+      return NextResponse.json(
+        { error: 'Failed to set webhook', details: error.message },
+        { status: 500 }
+      );
+    }
+  }
+
+  if (action === 'getWebhook') {
+    try {
+      const response = await fetch(`${TELEGRAM_API}/getWebhookInfo`);
+      const data = await response.json();
+      return NextResponse.json(data);
+    } catch (error) {
+      return NextResponse.json(
+        { error: 'Failed to get webhook info', details: error.message },
+        { status: 500 }
+      );
+    }
+  }
+
+  return NextResponse.json({
+    usage: 'Use ?action=setWebhook to configure webhook, ?action=getWebhook to check status',
+  });
+}
+
 export async function POST(req) {
   try {
     const update = await req.json();
