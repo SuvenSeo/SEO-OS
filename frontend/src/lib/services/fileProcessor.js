@@ -74,7 +74,7 @@ export async function analyzeImage(imageUrl, prompt = 'Describe this image in de
  * Parse a PDF buffer to text.
  */
 export async function parsePdf(buffer) {
-  const pdfParse = (await import('pdf-parse/lib/pdf-parse.js')).default;
+  const pdfParse = (await import('pdf-parse')).default;
   const data = await pdfParse(Buffer.from(buffer));
   return data.text.replace(/\s+/g, ' ').trim().substring(0, 6000);
 }
