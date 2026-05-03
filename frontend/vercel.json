@@ -3,6 +3,27 @@
   "functions": {
     "src/app/api/telegram/webhook/route.js": {
       "maxDuration": 30
+    },
+    "src/app/api/proactive/route.js": {
+      "maxDuration": 30
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/proactive?action=reminder-check",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/proactive?action=morning-brief",
+      "schedule": "30 2 * * *"
+    },
+    {
+      "path": "/api/proactive?action=evening-checkin",
+      "schedule": "30 14 * * *"
+    },
+    {
+      "path": "/api/proactive?action=weekly-review",
+      "schedule": "0 12 * * 0"
+    }
+  ]
 }

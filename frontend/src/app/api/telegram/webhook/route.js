@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import supabase from '@/lib/config/supabase';
 import { generateResponse } from '@/lib/services/groq';
-import { sendMessage } from '@/lib/services/telegram';
+import { sendMessage, sendChatAction } from '@/lib/services/telegram';
 import { getFullPrompt } from '@/lib/services/context';
 import { processExchange, formatSummary } from '@/lib/services/postProcessor';
 import { downloadTelegramFile, readUrl, analyzeImage, parsePdf, parseWord, getBestPhotoFileId, extractUrls } from '@/lib/services/fileProcessor';
@@ -134,6 +134,12 @@ async function handleUpdate(update) {
     return;
   }
 
+  // Voice message
+  if (msg.voice) {
+    await handleVoice(chatId, msg, messageId);
+    return;
+  }
+
   // Photo message
   if (msg.photo) {
     await handlePhoto(chatId, msg, messageId);
@@ -226,9 +232,47 @@ async function handleDocument(chatId, msg, messageId) {
   }
 }
 
+async function handleVoice(chatId, msg, messageId) {
+  try {
+    await sendChatAction(chatId, 'typing');
+    const { buffer } = await downloadTelegramFile(msg.voice.file_id);
+
+    // Transcribe with Groq Whisper (free)
+    const groqKey = (process.env.GROQ_API_KEYS || process.env.GROQ_API_KEY || '').split(',')[0].trim();
+    const formData = new FormData();
+    formData.append('file', new Blob([buffer], { type: 'audio/ogg' }), 'voice.ogg');
+    formData.append('model', 'whisper-large-v3');
+    formData.append('language', 'en');
+
+    const resp = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${groqKey}` },
+      body: formData,
+    });
+
+    if (!resp.ok) throw new Error(`Whisper error: ${resp.status}`);
+    const data = await resp.json();
+    const transcript = data.text || '';
+
+    if (!transcript) {
+      return await sendMessage(chatId, '⚠️ Could not transcribe voice message.');
+    }
+
+    await sendMessage(chatId, `🎙️ _"${transcript}"_`);
+    await handleMessage(chatId, transcript, messageId);
+  } catch (err) {
+    console.error('[Telegram] Voice error:', err.message);
+    await sendMessage(chatId, `❌ Voice processing failed: ${err.message}`);
+  }
+}
+
 async function handleMessage(chatId, text, messageId) {
+  // Show typing indicator
+  await sendChatAction(chatId, 'typing');
+
   // Auto-detect URLs in the message and read them
   const urls = extractUrls(text);
+  let processedText = text;
   if (urls.length > 0 && !text.startsWith('[')) {
     for (const url of urls.slice(0, 2)) {
       try {
@@ -239,8 +283,7 @@ async function handleMessage(chatId, text, messageId) {
           content: `[URL: ${url}]\n${content}`,
           embedding_summary: content.substring(0, 200),
         });
-        const enrichedText = text.replace(url, `[URL content from ${url}: ${content.substring(0, 500)}...]`);
-        text = enrichedText;
+        processedText = processedText.replace(url, `[URL content from ${url}: ${content.substring(0, 500)}...]`);
       } catch (err) {
         console.warn(`[Telegram] URL read failed for ${url}:`, err.message);
       }
@@ -252,7 +295,7 @@ async function handleMessage(chatId, text, messageId) {
     // Save user message
     supabase.from('episodic_memory').insert({
       role: 'user',
-      content: text,
+      content: processedText,
       telegram_message_id: messageId,
     }),
     // Track morning brief reply
@@ -266,7 +309,7 @@ async function handleMessage(chatId, text, messageId) {
       }
     })(),
     // Build full context + system prompt
-    getFullPrompt(text),
+    getFullPrompt(processedText),
     // Fetch recent conversation history
     supabase.from('episodic_memory').select('role, content').order('created_at', { ascending: false }).limit(20),
   ]);
@@ -276,16 +319,26 @@ async function handleMessage(chatId, text, messageId) {
     .map(m => ({ role: m.role, content: m.content }));
 
   // Generate AI response
-  const aiResponse = await generateResponse(systemPrompt, messages);
+  let aiResponse;
+  try {
+    aiResponse = await generateResponse(systemPrompt, messages);
+  } catch (err) {
+    console.error('[Telegram] AI generation failed:', err.message);
+    await sendMessage(chatId, '⚠️ All AI providers are currently down. Try again in a minute.');
+    return;
+  }
 
   // Send reply FIRST — user sees it immediately
   await sendMessage(chatId, aiResponse);
   console.log('[Telegram] AI response sent');
 
+  // Skip post-processing for short/casual messages (saves an API call)
+  const isShort = processedText.length < 15 && !processedText.match(/remind|task|deadline|schedule|set|save/i);
+
   // Save AI response + post-process in background (user already has reply)
   await Promise.all([
     supabase.from('episodic_memory').insert({ role: 'assistant', content: aiResponse }),
-    processExchange(text, aiResponse).then(summary => {
+    isShort ? Promise.resolve() : processExchange(processedText, aiResponse).then(summary => {
       const summaryText = formatSummary(summary);
       if (summaryText.trim()) {
         return sendMessage(chatId, summaryText);

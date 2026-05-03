@@ -20,6 +20,7 @@ export async function sendMessage(chatId, text, options = {}) {
   // Split long messages
   const chunks = splitMessage(text, MAX_MESSAGE_LENGTH);
 
+  let lastResult = null;
   for (const chunk of chunks) {
     try {
       const body = {
@@ -44,7 +45,7 @@ export async function sendMessage(chatId, text, options = {}) {
         // If Markdown parsing fails, retry without parse_mode
         if (data.description?.includes('parse')) {
           console.warn('[Telegram] Markdown parse failed, retrying as plain text');
-          await fetch(`${TELEGRAM_API}/sendMessage`, {
+          const retryResp = await fetch(`${TELEGRAM_API}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -52,17 +53,19 @@ export async function sendMessage(chatId, text, options = {}) {
               text: chunk,
             }),
           });
+          lastResult = await retryResp.json();
         } else {
           console.error('[Telegram] Send failed:', data.description);
         }
+      } else {
+        lastResult = data;
       }
-
-      return data;
     } catch (error) {
       console.error('[Telegram] Network error:', error.message);
       throw error;
     }
   }
+  return lastResult;
 }
 
 /**
@@ -97,6 +100,21 @@ export function splitMessage(text, maxLength) {
   }
 
   return chunks;
+}
+
+/**
+ * Send a chat action (e.g. 'typing') to show the bot is working.
+ */
+export async function sendChatAction(chatId, action = 'typing') {
+  try {
+    await fetch(`${TELEGRAM_API}/sendChatAction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, action }),
+    });
+  } catch (e) {
+    // Non-critical, ignore
+  }
 }
 
 /**
