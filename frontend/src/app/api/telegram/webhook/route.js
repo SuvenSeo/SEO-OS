@@ -70,15 +70,23 @@ export async function POST(req) {
 }
 
 async function handleUpdate(update) {
-  if (!update.message || !update.message.text) return;
+  console.log('[Telegram] Received update:', JSON.stringify(update));
+
+  if (!update.message || !update.message.text) {
+    console.log('[Telegram] No message text, ignoring');
+    return;
+  }
 
   const chatId = update.message.chat.id.toString();
   const messageText = update.message.text.trim();
   const messageId = update.message.message_id;
 
+  console.log(`[Telegram] Message from chat ${chatId}: "${messageText.substring(0, 50)}..."`);
+  console.log(`[Telegram] Expected CHAT_ID: ${process.env.TELEGRAM_CHAT_ID}`);
+
   // Verify it's from the authorized user
   if (chatId !== process.env.TELEGRAM_CHAT_ID) {
-    console.warn(`[Telegram] Unauthorized chat ID: ${chatId}`);
+    console.warn(`[Telegram] Unauthorized chat ID: ${chatId} (expected: ${process.env.TELEGRAM_CHAT_ID})`);
     return;
   }
 
@@ -89,7 +97,13 @@ async function handleUpdate(update) {
   }
 
   // Regular message flow
-  await handleMessage(chatId, messageText, messageId);
+  try {
+    await handleMessage(chatId, messageText, messageId);
+  } catch (error) {
+    console.error('[Telegram] handleMessage error:', error.message);
+    console.error(error.stack);
+    await sendMessage(chatId, `❌ Error: ${error.message}`);
+  }
 }
 
 async function handleMessage(chatId, text, messageId) {
