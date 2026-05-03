@@ -134,10 +134,15 @@ export async function POST(req) {
 }
 
 async function handleUpdate(update) {
+  console.log('[Telegram] ========== handleUpdate START ==========');
   console.log('[Telegram] Received update:', JSON.stringify(update));
 
-  if (!update.message || !update.message.text) {
-    console.log('[Telegram] No message text, ignoring');
+  if (!update.message) {
+    console.log('[Telegram] No message object, ignoring');
+    return;
+  }
+  if (!update.message.text) {
+    console.log('[Telegram] No message text, ignoring. Message type:', Object.keys(update.message));
     return;
   }
 
@@ -145,14 +150,17 @@ async function handleUpdate(update) {
   const messageText = update.message.text.trim();
   const messageId = update.message.message_id;
 
-  console.log(`[Telegram] Message from chat ${chatId}: "${messageText.substring(0, 50)}..."`);
-  console.log(`[Telegram] Expected CHAT_ID: ${process.env.TELEGRAM_CHAT_ID}`);
+  console.log(`[Telegram] Parsed - chatId: ${chatId}, messageId: ${messageId}`);
+  console.log(`[Telegram] Message text: "${messageText.substring(0, 100)}..."`);
+  console.log(`[Telegram] Expected CHAT_ID from env: "${process.env.TELEGRAM_CHAT_ID}"`);
+  console.log(`[Telegram] Match check: "${chatId}" === "${process.env.TELEGRAM_CHAT_ID}" ? ${chatId === process.env.TELEGRAM_CHAT_ID}`);
 
   // Verify it's from the authorized user
   if (chatId !== process.env.TELEGRAM_CHAT_ID) {
-    console.warn(`[Telegram] Unauthorized chat ID: ${chatId} (expected: ${process.env.TELEGRAM_CHAT_ID})`);
+    console.warn(`[Telegram] Unauthorized chat ID: "${chatId}" !== "${process.env.TELEGRAM_CHAT_ID}"`);
     return;
   }
+  console.log('[Telegram] Chat ID authorized, proceeding...');
 
   // Check if it's a command
   if (messageText.startsWith('/')) {
@@ -171,43 +179,84 @@ async function handleUpdate(update) {
 }
 
 async function handleMessage(chatId, text, messageId) {
-  await supabase.from('episodic_memory').insert({
+  console.log('[handleMessage] Step 1: Saving user message...');
+  const { error: insertError } = await supabase.from('episodic_memory').insert({
     role: 'user',
     content: text,
     telegram_message_id: messageId,
   });
+  if (insertError) {
+    console.error('[handleMessage] Failed to save user message:', insertError);
+    throw new Error(`DB insert failed: ${insertError.message}`);
+  }
+  console.log('[handleMessage] Step 1: OK');
 
-  const istHour = new Date().toLocaleString('en-US', { timeZone: 'Asia/Colombo', hour: 'numeric', hour12: false });
-  const hour = parseInt(istHour, 10);
-  if (hour >= 8 && hour < 11) {
-    await supabase.from('working_memory').upsert(
-      { key: 'morning_brief_replied', value: 'true' },
-      { onConflict: 'key' }
-    );
+  console.log('[handleMessage] Step 2: Getting system prompt...');
+  let systemPrompt;
+  try {
+    systemPrompt = await getFullPrompt(text);
+    console.log('[handleMessage] Step 2: OK');
+  } catch (err) {
+    console.error('[handleMessage] Failed to get prompt:', err);
+    throw new Error(`getFullPrompt failed: ${err.message}`);
   }
 
-  const systemPrompt = await getFullPrompt(text);
-  const { data: recentMessages } = await supabase
+  console.log('[handleMessage] Step 3: Fetching recent messages...');
+  const { data: recentMessages, error: fetchError } = await supabase
     .from('episodic_memory')
     .select('role, content')
     .order('created_at', { ascending: false })
     .limit(10);
+  if (fetchError) {
+    console.error('[handleMessage] Failed to fetch messages:', fetchError);
+    throw new Error(`DB fetch failed: ${fetchError.message}`);
+  }
+  console.log('[handleMessage] Step 3: OK, fetched', recentMessages?.length || 0, 'messages');
 
   const messages = (recentMessages || [])
     .reverse()
     .map(m => ({ role: m.role, content: m.content }));
 
-  const aiResponse = await generateResponse(systemPrompt, messages);
+  console.log('[handleMessage] Step 4: Generating AI response...');
+  let aiResponse;
+  try {
+    aiResponse = await generateResponse(systemPrompt, messages);
+    console.log('[handleMessage] Step 4: OK, response length:', aiResponse?.length);
+  } catch (err) {
+    console.error('[handleMessage] AI generation failed:', err);
+    throw new Error(`AI generation failed: ${err.message}`);
+  }
 
-  await supabase.from('episodic_memory').insert({
+  console.log('[handleMessage] Step 5: Saving AI response...');
+  const { error: aiInsertError } = await supabase.from('episodic_memory').insert({
     role: 'assistant',
     content: aiResponse,
   });
+  if (aiInsertError) {
+    console.error('[handleMessage] Failed to save AI response:', aiInsertError);
+    throw new Error(`DB insert AI failed: ${aiInsertError.message}`);
+  }
+  console.log('[handleMessage] Step 5: OK');
 
-  const summary = await processExchange(text, aiResponse);
-  const summaryText = formatSummary(summary);
+  console.log('[handleMessage] Step 6: Processing exchange...');
+  let summary, summaryText;
+  try {
+    summary = await processExchange(text, aiResponse);
+    summaryText = formatSummary(summary);
+    console.log('[handleMessage] Step 6: OK');
+  } catch (err) {
+    console.error('[handleMessage] Process exchange failed:', err);
+    summaryText = '';
+  }
 
-  await sendMessage(chatId, aiResponse + summaryText);
+  console.log('[handleMessage] Step 7: Sending Telegram message...');
+  try {
+    await sendMessage(chatId, aiResponse + summaryText);
+    console.log('[handleMessage] Step 7: OK - Message sent!');
+  } catch (err) {
+    console.error('[handleMessage] Failed to send message:', err);
+    throw new Error(`Send failed: ${err.message}`);
+  }
 }
 
 async function handleCommand(chatId, text, messageId) {
