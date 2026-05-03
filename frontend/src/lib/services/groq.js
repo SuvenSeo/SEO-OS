@@ -1,8 +1,17 @@
 import Groq from 'groq-sdk';
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
+let groq;
+
+function getGroqClient() {
+  if (!groq) {
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) {
+      throw new Error('[SEOS] Missing GROQ_API_KEY environment variable');
+    }
+    groq = new Groq({ apiKey });
+  }
+  return groq;
+}
 
 const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
 const MAX_RETRIES = 3;
@@ -29,7 +38,7 @@ export async function generateResponse(systemPrompt, messages, options = {}) {
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const completion = await groq.chat.completions.create({
+      const completion = await getGroqClient().chat.completions.create({
         model,
         messages: fullMessages,
         temperature,
