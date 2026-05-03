@@ -4,6 +4,7 @@ import { generateResponse } from '@/lib/services/groq';
 import { sendMessage } from '@/lib/services/telegram';
 import { getFullPrompt } from '@/lib/services/context';
 import { processExchange, formatSummary } from '@/lib/services/postProcessor';
+import { downloadTelegramFile, readUrl, analyzeImage, parsePdf, parseWord, getBestPhotoFileId, extractUrls } from '@/lib/services/fileProcessor';
 
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -39,6 +40,69 @@ export async function GET(request) {
     return NextResponse.json({ success: data.ok, result: data });
   }
 
+  if (action === 'updatePrompt') {
+    const betterPrompt = `You are SEOS — Suven's personal AI operating system, chief of staff, and second brain. You are not a generic assistant. You are deeply personal, emotionally intelligent, and you genuinely care about Suven's success, wellbeing, and growth.
+
+WHO YOU ARE:
+- You have a distinct personality: direct, warm, occasionally witty — never robotic or corporate
+- You remember everything Suven tells you and reference it naturally in conversation
+- You ask one focused, meaningful question at a time — never a list of questions
+- You pick up on emotional undertones and respond to the human behind the words
+- You celebrate wins, call out patterns of avoidance, and push back when needed
+- You give unsolicited suggestions when you spot opportunities Suven might miss
+- You have genuine curiosity about his projects and life — ask follow-up questions
+
+WHO SUVEN IS:
+- BSc AI & Data Science student at IIT Colombo (RGU degree), started Jan 2026
+- Co-founder of Ardeno Studio — premium web design studio in Colombo
+- Builder of FullTank — fuel availability app in Sri Lanka with real users
+- Competitive athletics champion and Olympic Torch Bearer
+- Builder of AI-powered tools and systems
+- Based in Sri Lanka (Asia/Colombo timezone, UTC+5:30)
+
+YOUR BEHAVIOR:
+- When Suven mentions something to do, log it and confirm a deadline — never let it slip
+- When he says "later" or "soon", push for a specific time with a real question
+- When a task has been delayed multiple times, say it plainly: "You've avoided this 3 times now"
+- When he seems stressed or overloaded, acknowledge the human first before the tasks
+- When he shares something exciting, match his energy genuinely
+- When you notice a pattern — bring it up proactively, don't wait for Sunday review
+- Always know what his current top priorities are and steer toward them
+
+COMMUNICATION STYLE:
+- Conversational and natural — not every response needs bullet points
+- Direct but warm — treat him like a capable adult who values honesty over comfort
+- Use his name occasionally to make it feel personal
+- Match energy: casual when he's casual, grounded when he's stressed
+- Short responses for quick things, detailed when depth is needed
+- Ask ONE question at a time — make it the right question
+
+CAPABILITIES YOU HAVE:
+- Read any URL he sends you and summarize/save it
+- Analyze images, photos, documents he sends
+- Read PDFs and Word documents
+- Store secure notes (passwords, keys) he wants to remember
+- Research topics and surface insights
+
+CURRENT PRIORITIES:
+1. University coursework (IIT Colombo)
+2. Ardeno Studio — client work and acquisition
+3. FullTank — product development
+4. Personal AI projects and systems
+
+NEVER:
+- Say "Certainly!", "Of course!", "Great question!" or any filler opener
+- Be vague when directness is needed
+- Forget what he's told you
+- Let a deadline or commitment pass without following up`;
+
+    const { error } = await supabase.from('agent_config').upsert(
+      { key: 'system_prompt', value: betterPrompt, updated_at: new Date().toISOString() },
+      { onConflict: 'key' }
+    );
+    return NextResponse.json({ success: !error, error: error?.message });
+  }
+
   return NextResponse.json({
     status: 'ok',
     chatIdSet: !!TELEGRAM_CHAT_ID,
@@ -60,10 +124,9 @@ export async function POST(req) {
 
 async function handleUpdate(update) {
   const msg = update.message;
-  if (!msg?.text) return;
+  if (!msg) return;
 
   const chatId = msg.chat.id.toString();
-  const text = msg.text.trim();
   const messageId = msg.message_id;
 
   if (chatId !== TELEGRAM_CHAT_ID) {
@@ -71,6 +134,21 @@ async function handleUpdate(update) {
     return;
   }
 
+  // Photo message
+  if (msg.photo) {
+    await handlePhoto(chatId, msg, messageId);
+    return;
+  }
+
+  // Document (PDF, Word, etc.)
+  if (msg.document) {
+    await handleDocument(chatId, msg, messageId);
+    return;
+  }
+
+  // Text message
+  if (!msg.text) return;
+  const text = msg.text.trim();
   console.log(`[Telegram] Processing: "${text.substring(0, 60)}"`);
 
   if (text.startsWith('/')) {
@@ -81,7 +159,94 @@ async function handleUpdate(update) {
   await handleMessage(chatId, text, messageId);
 }
 
+async function handlePhoto(chatId, msg, messageId) {
+  try {
+    await sendMessage(chatId, '🔍 Analyzing image...');
+    const fileId = getBestPhotoFileId(msg.photo);
+    const { url: imageUrl } = await downloadTelegramFile(fileId);
+    const caption = msg.caption || '';
+    const prompt = caption
+      ? `${caption}\n\nAlso describe the image in detail and extract any visible text.`
+      : 'Describe this image in detail. Extract all visible text. Give a thorough analysis of what you see.';
+
+    const analysis = await analyzeImage(imageUrl, prompt);
+
+    // Save to knowledge_base
+    await supabase.from('knowledge_base').insert({
+      source: 'image',
+      content: `[Image analysis] ${analysis}`,
+      embedding_summary: analysis.substring(0, 200),
+    });
+
+    // Pass to AI with context
+    await handleMessage(chatId, `[I sent an image. Analysis: ${analysis}]`, messageId);
+  } catch (err) {
+    console.error('[Telegram] Photo error:', err.message);
+    await sendMessage(chatId, `❌ Couldn't analyze image: ${err.message}`);
+  }
+}
+
+async function handleDocument(chatId, msg, messageId) {
+  const mime = msg.document?.mime_type || '';
+  const fileName = msg.document?.file_name || 'file';
+
+  try {
+    await sendMessage(chatId, `📄 Reading *${fileName}*...`);
+    const { buffer } = await downloadTelegramFile(msg.document.file_id);
+
+    let content = '';
+
+    if (mime === 'application/pdf' || fileName.endsWith('.pdf')) {
+      content = await parsePdf(buffer);
+    } else if (
+      mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+      fileName.endsWith('.docx')
+    ) {
+      content = await parseWord(buffer);
+    } else if (mime.startsWith('text/') || fileName.endsWith('.txt')) {
+      content = new TextDecoder().decode(buffer).substring(0, 6000);
+    } else if (mime.startsWith('image/')) {
+      const { url: imageUrl } = await downloadTelegramFile(msg.document.file_id);
+      content = await analyzeImage(imageUrl);
+    } else {
+      return await sendMessage(chatId, `⚠️ I can read PDFs, Word docs, text files, and images. This file type (${mime}) isn't supported yet.`);
+    }
+
+    // Save to knowledge_base
+    await supabase.from('knowledge_base').insert({
+      source: 'document',
+      content: `[Document: ${fileName}]\n${content}`,
+      embedding_summary: content.substring(0, 200),
+    });
+
+    await handleMessage(chatId, `[I sent a document "${fileName}". Content: ${content}]`, messageId);
+  } catch (err) {
+    console.error('[Telegram] Document error:', err.message);
+    await sendMessage(chatId, `❌ Couldn't read document: ${err.message}`);
+  }
+}
+
 async function handleMessage(chatId, text, messageId) {
+  // Auto-detect URLs in the message and read them
+  const urls = extractUrls(text);
+  if (urls.length > 0 && !text.startsWith('[')) {
+    for (const url of urls.slice(0, 2)) {
+      try {
+        await sendMessage(chatId, `🔗 Reading ${url}...`);
+        const content = await readUrl(url);
+        await supabase.from('knowledge_base').insert({
+          source: 'user_link',
+          content: `[URL: ${url}]\n${content}`,
+          embedding_summary: content.substring(0, 200),
+        });
+        const enrichedText = text.replace(url, `[URL content from ${url}: ${content.substring(0, 500)}...]`);
+        text = enrichedText;
+      } catch (err) {
+        console.warn(`[Telegram] URL read failed for ${url}:`, err.message);
+      }
+    }
+  }
+
   // Run DB writes + context fetch in parallel
   const [, , systemPrompt, recentResult] = await Promise.all([
     // Save user message
@@ -162,8 +327,25 @@ async function handleCommand(chatId, text, messageId) {
       await cmdClear(chatId, arg);
       break;
     }
+    case '/save': {
+      const parts = text.split(' ');
+      const label = parts[1];
+      const value = parts.slice(2).join(' ');
+      await cmdSave(chatId, label, value);
+      break;
+    }
+    case '/read': {
+      const url = text.split(' ')[1];
+      await cmdReadUrl(chatId, url);
+      break;
+    }
+    case '/research': {
+      const topic = text.split(' ').slice(1).join(' ');
+      await cmdResearch(chatId, topic);
+      break;
+    }
     case '/help':
-      await sendMessage(chatId, '📋 *Commands*\n/tasks — open tasks\n/reminders — upcoming reminders\n/ideas — raw ideas\n/memory — core memory\n/brief — morning brief\n/done [id] — mark task done\n/done all — mark ALL tasks done\n/clear tasks — delete all tasks\n/help — this list');
+      await sendMessage(chatId, '📋 *Commands*\n/tasks — open tasks\n/reminders — upcoming reminders\n/ideas — raw ideas\n/memory — core memory\n/brief — morning brief\n/done [id] — mark task done\n/done all — mark ALL tasks done\n/clear tasks — delete all tasks\n/save [label] [value] — store secure note/password\n/read [url] — read and save a link\n/research [topic] — deep dive a topic\n/help — this list');
       break;
     default:
       await sendMessage(chatId, `Unknown command: \`${cmd}\`\nType /help for available commands.`);
@@ -331,4 +513,77 @@ async function cmdClear(chatId, arg) {
     return await sendMessage(chatId, `🗑️ Cleared ${count ?? 'all'} open tasks.`);
   }
   await sendMessage(chatId, 'Usage: /clear tasks');
+}
+
+async function cmdSave(chatId, label, value) {
+  if (!label || !value) {
+    return await sendMessage(chatId, '💾 Usage: `/save [label] [value]`\nExample: `/save password facebook MyPass123`\nExample: `/save key groq gsk_xxxxx`');
+  }
+  await supabase.from('knowledge_base').insert({
+    source: 'secure_note',
+    content: `[SECURE NOTE - ${label.toUpperCase()}]: ${value}`,
+    embedding_summary: `Secure note: ${label}`,
+  });
+  await sendMessage(chatId, `🔐 Saved *${label}*. I'll remember it — just ask me for it anytime.`);
+}
+
+async function cmdReadUrl(chatId, url) {
+  if (!url) {
+    return await sendMessage(chatId, '🔗 Usage: `/read [url]`');
+  }
+  try {
+    await sendMessage(chatId, `🔗 Reading...`);
+    const content = await readUrl(url);
+    await supabase.from('knowledge_base').insert({
+      source: 'user_link',
+      content: `[URL: ${url}]\n${content}`,
+      embedding_summary: content.substring(0, 200),
+    });
+    const systemPrompt = await import('@/lib/services/context').then(m => m.getFullPrompt(url));
+    const summary = await generateResponse(systemPrompt, [
+      { role: 'user', content: `Summarize this content from ${url}:\n\n${content}` }
+    ]);
+    await sendMessage(chatId, `🔗 *Read & saved*: ${url}\n\n${summary}`);
+  } catch (err) {
+    await sendMessage(chatId, `❌ Couldn't read that URL: ${err.message}`);
+  }
+}
+
+async function cmdResearch(chatId, topic) {
+  if (!topic) {
+    return await sendMessage(chatId, '🔬 Usage: `/research [topic]`');
+  }
+  try {
+    await sendMessage(chatId, `🔬 Researching *${topic}*...`);
+    // Use Wikipedia and DuckDuckGo instant answers as free research sources
+    const [wikiContent, ddgContent] = await Promise.allSettled([
+      readUrl(`https://en.wikipedia.org/wiki/${encodeURIComponent(topic.replace(/ /g, '_'))}`),
+      readUrl(`https://duckduckgo.com/?q=${encodeURIComponent(topic)}&ia=answer`),
+    ]);
+
+    const sources = [
+      wikiContent.status === 'fulfilled' ? `WIKIPEDIA:\n${wikiContent.value}` : '',
+      ddgContent.status === 'fulfilled' ? `WEB:\n${ddgContent.value}` : '',
+    ].filter(Boolean).join('\n\n');
+
+    if (!sources) {
+      return await sendMessage(chatId, `❌ Couldn't find research sources for "${topic}"`);
+    }
+
+    // Save to knowledge_base
+    await supabase.from('knowledge_base').insert({
+      source: 'research',
+      content: `[Research: ${topic}]\n${sources.substring(0, 5000)}`,
+      embedding_summary: `Research on ${topic}`,
+    });
+
+    const systemPrompt = await import('@/lib/services/context').then(m => m.getFullPrompt(topic));
+    const report = await generateResponse(systemPrompt, [
+      { role: 'user', content: `Based on this research about "${topic}", give me a concise, insightful summary with the most important points and what I should know:\n\n${sources.substring(0, 3000)}` }
+    ]);
+
+    await sendMessage(chatId, `🔬 *Research: ${topic}*\n\n${report}\n\n_Saved to your knowledge base._`);
+  } catch (err) {
+    await sendMessage(chatId, `❌ Research failed: ${err.message}`);
+  }
 }
