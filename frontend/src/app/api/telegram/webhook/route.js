@@ -71,8 +71,33 @@ export async function GET(request) {
     }
   }
 
+  if (action === 'sendTest') {
+    try {
+      const testChatId = process.env.TELEGRAM_CHAT_ID;
+      const response = await fetch(`${TELEGRAM_API}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: testChatId,
+          text: '🔴 Test message from SEOS webhook',
+        }),
+      });
+      const data = await response.json();
+      return NextResponse.json({
+        success: data.ok,
+        result: data,
+        sentTo: testChatId,
+      });
+    } catch (error) {
+      return NextResponse.json(
+        { error: 'Failed to send test message', details: error.message },
+        { status: 500 }
+      );
+    }
+  }
+
   return NextResponse.json({
-    usage: 'Use ?action=setWebhook to configure webhook, ?action=getWebhook to check status, ?action=test to verify bot',
+    usage: 'Use ?action=setWebhook|getWebhook|test|sendTest',
   });
 }
 
@@ -82,7 +107,24 @@ export async function POST(req) {
 
     // Respond immediately to Telegram to prevent timeout
     // We don't await the handler so Vercel returns 200 OK fast
-    handleUpdate(update).catch(err => console.error('[Telegram Handler Error]', err));
+    handleUpdate(update).catch(async (err) => {
+      console.error('[Telegram Handler Error]', err);
+      try {
+        const chatId = update?.message?.chat?.id;
+        if (chatId) {
+          await fetch(`${TELEGRAM_API}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: `❌ Error: ${err.message}`,
+            }),
+          });
+        }
+      } catch (sendErr) {
+        console.error('[Telegram] Failed to send error message:', sendErr);
+      }
+    });
 
     return NextResponse.json({ ok: true });
   } catch (error) {
