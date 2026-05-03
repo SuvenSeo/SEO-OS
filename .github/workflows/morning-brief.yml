@@ -10,7 +10,7 @@ jobs:
     steps:
       - name: Trigger Morning Brief
         run: |
-          curl -X POST "${{ secrets.RAILWAY_URL }}/api/proactive/morning-brief" \
+          curl -X POST "${{ secrets.API_URL }}/api/proactive/morning-brief" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             -H "Content-Type: application/json" \
             --fail --silent --show-error

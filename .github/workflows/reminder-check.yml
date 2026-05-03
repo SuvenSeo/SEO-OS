@@ -10,7 +10,7 @@ jobs:
     steps:
       - name: Trigger Reminder Check
         run: |
-          curl -X POST "${{ secrets.RAILWAY_URL }}/api/proactive/reminder-check" \
+          curl -X POST "${{ secrets.API_URL }}/api/proactive/reminder-check" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             -H "Content-Type: application/json" \
             --fail --silent --show-error

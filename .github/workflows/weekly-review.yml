@@ -10,7 +10,7 @@ jobs:
     steps:
       - name: Trigger Weekly Review
         run: |
-          curl -X POST "${{ secrets.RAILWAY_URL }}/api/proactive/weekly-review" \
+          curl -X POST "${{ secrets.API_URL }}/api/proactive/weekly-review" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             -H "Content-Type: application/json" \
             --fail --silent --show-error

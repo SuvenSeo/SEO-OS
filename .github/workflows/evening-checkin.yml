@@ -10,7 +10,7 @@ jobs:
     steps:
       - name: Trigger Evening Check-in
         run: |
-          curl -X POST "${{ secrets.RAILWAY_URL }}/api/proactive/evening-checkin" \
+          curl -X POST "${{ secrets.API_URL }}/api/proactive/evening-checkin" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             -H "Content-Type: application/json" \
             --fail --silent --show-error

@@ -10,7 +10,7 @@ jobs:
     steps:
       - name: Trigger Accountability Check
         run: |
-          curl -X POST "${{ secrets.RAILWAY_URL }}/api/proactive/accountability" \
+          curl -X POST "${{ secrets.API_URL }}/api/proactive/accountability" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             -H "Content-Type: application/json" \
             --fail --silent --show-error

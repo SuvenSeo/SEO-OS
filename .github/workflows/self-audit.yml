@@ -10,7 +10,7 @@ jobs:
     steps:
       - name: Trigger Self-Audit
         run: |
-          curl -X POST "${{ secrets.RAILWAY_URL }}/api/proactive/self-audit" \
+          curl -X POST "${{ secrets.API_URL }}/api/proactive/self-audit" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             -H "Content-Type: application/json" \
             --fail --silent --show-error
