@@ -35,8 +35,9 @@ export async function readUrl(url) {
  * Accepts a URL to the image (Telegram CDN URL).
  */
 export async function analyzeImage(imageUrl, prompt = 'Describe this image in detail. Extract all visible text. Give a thorough analysis.') {
-  const geminiKey = (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '').split(',')[0].trim();
-  if (!geminiKey) throw new Error('No Gemini API key for image analysis');
+  const geminiKeys = (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '')
+    .split(',').map(k => k.trim()).filter(Boolean);
+  if (geminiKeys.length === 0) throw new Error('No Gemini API key for image analysis');
 
   const imgResp = await fetch(imageUrl);
   if (!imgResp.ok) throw new Error('Could not download image');
@@ -44,30 +45,42 @@ export async function analyzeImage(imageUrl, prompt = 'Describe this image in de
   const base64 = Buffer.from(buffer).toString('base64');
   const mimeType = imgResp.headers.get('content-type') || 'image/jpeg';
 
-  const resp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: prompt },
-            { inline_data: { mime_type: mimeType, data: base64 } },
-          ],
-        }],
-        generationConfig: { maxOutputTokens: 2048 },
-      }),
-    }
-  );
+  // Try each Gemini key until one works
+  for (let i = 0; i < geminiKeys.length; i++) {
+    const apiKey = geminiKeys[i];
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { text: prompt },
+              { inline_data: { mime_type: mimeType, data: base64 } },
+            ],
+          }],
+          generationConfig: { maxOutputTokens: 2048 },
+        }),
+      }
+    );
 
-  if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`Gemini Vision error ${resp.status}: ${err}`);
+    if (resp.status === 429) {
+      console.warn(`[Vision] Gemini key ${i} rate limited, trying next...`);
+      continue;
+    }
+
+    if (!resp.ok) {
+      const err = await resp.text();
+      if (i < geminiKeys.length - 1) { console.warn(`[Vision] Key ${i} failed, trying next...`); continue; }
+      throw new Error(`Gemini Vision error ${resp.status}: ${err}`);
+    }
+
+    const data = await resp.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || 'Could not analyze image';
   }
 
-  const data = await resp.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || 'Could not analyze image';
+  throw new Error('All Gemini keys exhausted for image analysis');
 }
 
 /**
