@@ -92,9 +92,19 @@ Return ONLY valid JSON.`;
 
     const summary = { tasks: 0, reminders: 0, ideas: 0, memory_updates: 0, snoozed: 0 };
 
-    // Insert detected tasks
+    // Insert detected tasks — skip duplicates (same title already open)
     if (extracted.tasks && extracted.tasks.length > 0) {
+      const { data: existingTasks } = await supabase
+        .from('tasks')
+        .select('title')
+        .in('status', ['open', 'snoozed']);
+
+      const existingTitles = new Set(
+        (existingTasks || []).map(t => t.title.toLowerCase().trim())
+      );
+
       for (const task of extracted.tasks) {
+        if (existingTitles.has(task.title.toLowerCase().trim())) continue;
         const { error } = await supabase.from('tasks').insert({
           title: task.title,
           description: task.description || null,

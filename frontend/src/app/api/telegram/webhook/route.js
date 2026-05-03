@@ -153,12 +153,17 @@ async function handleCommand(chatId, text, messageId) {
       await cmdBrief(chatId);
       break;
     case '/done': {
-      const taskId = text.split(' ')[1];
-      await cmdDone(chatId, taskId);
+      const arg = text.split(' ')[1];
+      await cmdDone(chatId, arg);
+      break;
+    }
+    case '/clear': {
+      const arg = text.split(' ')[1];
+      await cmdClear(chatId, arg);
       break;
     }
     case '/help':
-      await sendMessage(chatId, '📋 *Commands*\n/tasks — open tasks\n/reminders — upcoming reminders\n/ideas — raw ideas\n/memory — core memory\n/brief — morning brief\n/done [id] — mark task done\n/help — this list');
+      await sendMessage(chatId, '📋 *Commands*\n/tasks — open tasks\n/reminders — upcoming reminders\n/ideas — raw ideas\n/memory — core memory\n/brief — morning brief\n/done [id] — mark task done\n/done all — mark ALL tasks done\n/clear tasks — delete all tasks\n/help — this list');
       break;
     default:
       await sendMessage(chatId, `Unknown command: \`${cmd}\`\nType /help for available commands.`);
@@ -283,21 +288,47 @@ async function cmdBrief(chatId) {
   await sendMessage(chatId, msg);
 }
 
-async function cmdDone(chatId, taskId) {
-  if (!taskId) {
-    return await sendMessage(chatId, '❌ Usage: /done [task-id]\nGet task IDs from /tasks');
+async function cmdDone(chatId, arg) {
+  if (!arg) {
+    return await sendMessage(chatId, '❌ Usage: /done [task-id] or /done all');
   }
 
-  const { data, error } = await supabase
+  if (arg.toLowerCase() === 'all') {
+    const { data: tasks } = await supabase
+      .from('tasks')
+      .update({ status: 'done', updated_at: new Date().toISOString() })
+      .in('status', ['open', 'snoozed'])
+      .select('title');
+    const count = tasks?.length || 0;
+    return await sendMessage(chatId, `✅ Marked ${count} task(s) as done.`);
+  }
+
+  // Fetch open tasks and match partial ID in JS (UUID columns don't support ilike)
+  const { data: tasks } = await supabase
+    .from('tasks')
+    .select('id, title')
+    .in('status', ['open', 'snoozed']);
+
+  const match = tasks?.find(t => t.id.startsWith(arg.toLowerCase()));
+  if (!match) {
+    return await sendMessage(chatId, `❌ Task not found: \`${arg}\`\nGet IDs from /tasks`);
+  }
+
+  await supabase
     .from('tasks')
     .update({ status: 'done', updated_at: new Date().toISOString() })
-    .ilike('id', `${taskId}%`)
-    .select('title')
-    .single();
+    .eq('id', match.id);
 
-  if (error || !data) {
-    return await sendMessage(chatId, `❌ Task not found: \`${taskId}\``);
+  await sendMessage(chatId, `✅ Done: *${match.title}*`);
+}
+
+async function cmdClear(chatId, arg) {
+  if (arg === 'tasks') {
+    const { count } = await supabase
+      .from('tasks')
+      .delete({ count: 'exact' })
+      .in('status', ['open', 'snoozed']);
+    return await sendMessage(chatId, `🗑️ Cleared ${count ?? 'all'} open tasks.`);
   }
-
-  await sendMessage(chatId, `✅ Done: *${data.title}*`);
+  await sendMessage(chatId, 'Usage: /clear tasks');
 }
