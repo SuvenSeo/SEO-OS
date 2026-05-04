@@ -11,7 +11,7 @@
   "crons": [
     {
       "path": "/api/proactive?action=reminder-check",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 3 * * *"
     },
     {
       "path": "/api/proactive?action=morning-brief",
