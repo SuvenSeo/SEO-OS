@@ -12,6 +12,53 @@ function setCache(key, val, ttlMs) {
 
 const TTL_5MIN  = 5  * 60 * 1000;
 const TTL_1MIN  = 1  * 60 * 1000;
+let hasWarnedMissingKnowledgeFts = false;
+
+async function fetchRelevantKnowledge(keywords) {
+  const ftsQuery = keywords.join(' | ');
+  const baseQuery = supabase
+    .from('knowledge_base')
+    .select('content, source, created_at')
+    .order('created_at', { ascending: false })
+    .limit(5);
+
+  const { data: ftsRows, error: ftsError } = await baseQuery
+    .textSearch('fts', ftsQuery, { type: 'plain', config: 'english' });
+
+  if (!ftsError) {
+    return ftsRows || [];
+  }
+
+  const message = (ftsError.message || '').toLowerCase();
+  const isMissingFts = ftsError.code === '42703' || message.includes('fts');
+  if (!isMissingFts) {
+    console.error('[Context] knowledge FTS query failed:', ftsError.message);
+    return [];
+  }
+
+  if (!hasWarnedMissingKnowledgeFts) {
+    console.warn('[Context] knowledge_base.fts missing; falling back to keyword ILIKE search.');
+    hasWarnedMissingKnowledgeFts = true;
+  }
+
+  const fallbackFilter = keywords
+    .map(k => `content.ilike.%${k.replace(/,/g, ' ')}%`)
+    .join(',');
+
+  const { data: fallbackRows, error: fallbackError } = await supabase
+    .from('knowledge_base')
+    .select('content, source, created_at')
+    .or(fallbackFilter)
+    .order('created_at', { ascending: false })
+    .limit(5);
+
+  if (fallbackError) {
+    console.error('[Context] knowledge fallback query failed:', fallbackError.message);
+    return [];
+  }
+
+  return fallbackRows || [];
+}
 
 /**
  * Build the full dynamic context for the AI brain.
@@ -103,15 +150,9 @@ async function buildContext(userMessage = '') {
       .slice(0, 8);
 
     if (keywords.length > 0) {
-      const ftsQuery = keywords.join(' | ');
-      const { data: knowledge } = await supabase
-        .from('knowledge_base')
-        .select('content, source, created_at')
-        .textSearch('fts', ftsQuery, { type: 'plain', config: 'english' })
-        .order('created_at', { ascending: false })
-        .limit(5);
+      const knowledge = await fetchRelevantKnowledge(keywords);
 
-      if (knowledge && knowledge.length > 0) {
+      if (knowledge.length > 0) {
         const knowledgeStr = knowledge
           .map(k => `  [${k.source}] ${k.content.substring(0, 300)}${k.content.length > 300 ? '...' : ''}`)
           .join('\n\n');

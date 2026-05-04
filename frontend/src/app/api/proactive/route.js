@@ -8,16 +8,16 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const CRON_SECRET = process.env.CRON_SECRET;
 
 /** Max episodic_memory rows to keep (oldest removed by daily cron). */
-const EPISODIC_MEMORY_RETENTION = 1500;
+const EPISODIC_MEMORY_RETENTION = 500;
+const EPISODIC_SUMMARY_BATCH = 120;
+const EPISODIC_CORE_MEMORY_KEY = 'episodic_consolidated_summary';
+const EPISODIC_CORE_MEMORY_MAX_CHARS = 12000;
 
-// Vercel: set CRON_SECRET in Production — platform sends Authorization: Bearer <CRON_SECRET>.
-// Crons run on Production only. Hobby plan allows at most one cron invocation per day per job;
-// sub-daily schedules (e.g. */5) require a paid plan — see https://vercel.com/docs/cron-jobs/usage-and-pricing
 export async function GET(request) {
-  const authHeader = request.headers.get('authorization');
-  if (!CRON_SECRET || authHeader !== `Bearer ${CRON_SECRET}`) {
+  const auth = resolveCronAuth(request);
+  if (!auth.ok) {
     if (process.env.NODE_ENV === 'development') {
-      console.warn('[Proactive] 401:', !CRON_SECRET ? 'missing CRON_SECRET env' : 'authorization mismatch');
+      console.warn('[Proactive] 401:', auth.reason);
     }
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
@@ -39,10 +39,12 @@ export async function GET(request) {
         await triggerWeeklyReview();
         return NextResponse.json({ ok: true, action: 'weekly-review' });
 
-      case 'memory-prune': {
-        const { deleted } = await pruneEpisodicMemory();
-        return NextResponse.json({ ok: true, action: 'memory-prune', deleted });
-      }
+      case 'memory-prune':
+        return NextResponse.json({
+          ok: true,
+          action: 'memory-prune',
+          ...(await consolidateAndPruneEpisodicMemory()),
+        });
 
       case 'reminder-check':
       default:
@@ -241,6 +243,128 @@ Write a direct, honest paragraph about the week. Then list 3-5 specific intentio
   });
 
   await sendMessage(CHAT_ID, `📊 *WEEKLY REVIEW*\n\n${review}`);
+}
+
+function resolveCronAuth(request) {
+  const authHeader = request.headers.get('authorization');
+  if (CRON_SECRET && authHeader === `Bearer ${CRON_SECRET}`) {
+    return { ok: true, mode: 'bearer' };
+  }
+
+  // Vercel Cron adds x-vercel-cron, which is the platform-native verification signal.
+  const vercelCronHeader = request.headers.get('x-vercel-cron');
+  if (vercelCronHeader) {
+    return { ok: true, mode: 'vercel-cron' };
+  }
+
+  if (CRON_SECRET && authHeader) {
+    return { ok: false, reason: 'authorization mismatch' };
+  }
+  if (CRON_SECRET && !authHeader) {
+    return { ok: false, reason: 'missing authorization header' };
+  }
+  return { ok: false, reason: 'missing cron verification (CRON_SECRET or x-vercel-cron)' };
+}
+
+async function consolidateAndPruneEpisodicMemory() {
+  const { count, error: countError } = await supabase
+    .from('episodic_memory')
+    .select('id', { count: 'exact', head: true });
+  if (countError) {
+    console.error('[Proactive] count episodic_memory failed:', countError.message);
+    throw countError;
+  }
+
+  const totalRows = count || 0;
+  const excess = Math.max(0, totalRows - EPISODIC_MEMORY_RETENTION);
+
+  let summarized = 0;
+  if (excess > 0) {
+    const { data: pruneCandidates, error: candidateError } = await supabase
+      .from('episodic_memory')
+      .select('role, content, created_at')
+      .order('created_at', { ascending: true })
+      .limit(Math.min(excess, EPISODIC_SUMMARY_BATCH));
+    if (candidateError) {
+      console.error('[Proactive] load prune candidates failed:', candidateError.message);
+      throw candidateError;
+    }
+
+    if (pruneCandidates && pruneCandidates.length > 0) {
+      const summary = await summarizeEpisodesForCoreMemory(pruneCandidates, excess);
+      await appendConsolidatedSummary(summary);
+      summarized = pruneCandidates.length;
+    }
+  }
+
+  const { deleted } = await pruneEpisodicMemory();
+  return { deleted, summarized, excessBeforePrune: excess };
+}
+
+async function summarizeEpisodesForCoreMemory(rows, totalExcess) {
+  const transcript = rows
+    .map((r) => {
+      const cleaned = r.content.replace(/\s+/g, ' ').trim().slice(0, 240);
+      const ts = r.created_at ? new Date(r.created_at).toISOString().slice(0, 19) : 'unknown-time';
+      return `[${ts}] ${r.role}: ${cleaned}`;
+    })
+    .join('\n');
+
+  const systemPrompt = 'You condense personal chat logs into compact memory facts.';
+  const userPrompt = `Summarize this conversation archive into durable memory.
+Rules:
+- Output 4-8 bullet points.
+- Preserve commitments, deadlines, decisions, priorities, and personal context.
+- Keep each bullet under 160 characters.
+- No filler or generic phrasing.
+- Include uncertainty notes only if truly ambiguous.
+
+Rows summarized now: ${rows.length}
+Rows that will be pruned: ${totalExcess}
+
+TRANSCRIPT:
+${transcript}`;
+
+  const summary = await generateResponse(
+    systemPrompt,
+    [{ role: 'user', content: userPrompt }],
+    { temperature: 0.2, max_tokens: 450 }
+  );
+
+  return `[${new Date().toISOString()}] Consolidated ${rows.length}/${totalExcess} episodic rows\n${summary.trim()}`;
+}
+
+async function appendConsolidatedSummary(summary) {
+  const { data: existing, error: readError } = await supabase
+    .from('core_memory')
+    .select('value')
+    .eq('key', EPISODIC_CORE_MEMORY_KEY)
+    .maybeSingle();
+  if (readError) {
+    console.error('[Proactive] read episodic core memory failed:', readError.message);
+    throw readError;
+  }
+
+  const merged = [existing?.value, summary]
+    .filter(Boolean)
+    .join('\n\n')
+    .slice(-EPISODIC_CORE_MEMORY_MAX_CHARS);
+
+  const { error: upsertError } = await supabase
+    .from('core_memory')
+    .upsert(
+      {
+        key: EPISODIC_CORE_MEMORY_KEY,
+        value: merged,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'key' }
+    );
+
+  if (upsertError) {
+    console.error('[Proactive] upsert episodic core memory failed:', upsertError.message);
+    throw upsertError;
+  }
 }
 
 async function pruneEpisodicMemory() {

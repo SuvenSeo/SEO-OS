@@ -45,7 +45,7 @@ $$;
 -- ---------------------------------------------------------------------------
 -- 3) Retention prune for episodic_memory (keep N most recent by created_at)
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.prune_episodic_memory(p_keep integer DEFAULT 1500)
+CREATE OR REPLACE FUNCTION public.prune_episodic_memory(p_keep integer DEFAULT 500)
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY INVOKER
