@@ -13,6 +13,13 @@ const EPISODIC_SUMMARY_BATCH = 120;
 const EPISODIC_CORE_MEMORY_KEY = 'episodic_consolidated_summary';
 const EPISODIC_FACTS_MEMORY_KEY = 'episodic_consolidated_facts';
 const EPISODIC_CORE_MEMORY_MAX_CHARS = 12000;
+const IDLE_SUMMARY_THRESHOLD_MS = 2 * 60 * 60 * 1000;
+const SESSION_BREAK_MS = 90 * 60 * 1000;
+const DEADLINE_CLUSTER_COOLDOWN_HOURS = 10;
+const OVERCOMMIT_COOLDOWN_HOURS = 10;
+const DEADLINE_CLUSTER_KEY = 'insight_deadline_cluster_sent_until';
+const OVERCOMMIT_KEY = 'insight_overcommit_sent_until';
+const IDLE_SUMMARY_CURSOR_KEY = 'idle_summary_last_message_at';
 
 export async function GET(request) {
   const auth = resolveCronAuth(request);
@@ -210,6 +217,12 @@ async function checkRemindersAndTasks() {
     }).eq('id', t.id);
     fired++;
   }
+
+  // 5. Proactive insight engine (deadline clusters + overcommit detection)
+  fired += await maybeSendProactiveInsights(now, openTasks || []);
+
+  // 6. Idle-session consolidation (2h+ inactivity)
+  fired += await maybeSummarizeIdleConversation(now);
 
   return { fired };
 }
@@ -462,6 +475,171 @@ async function appendConsolidatedFacts(facts) {
   if (upsertError) {
     console.error('[Proactive] upsert episodic facts memory failed:', upsertError.message);
     throw upsertError;
+  }
+}
+
+async function maybeSendProactiveInsights(now, openTasks) {
+  if (!openTasks.length) return 0;
+
+  const { data: wmRows, error: wmError } = await supabase
+    .from('working_memory')
+    .select('key, value')
+    .in('key', [DEADLINE_CLUSTER_KEY, OVERCOMMIT_KEY])
+    .or(`expires_at.is.null,expires_at.gt.${now.toISOString()}`);
+  if (wmError) {
+    console.error('[Proactive] read insight cooldowns failed:', wmError.message);
+    throw wmError;
+  }
+
+  const wm = Object.fromEntries((wmRows || []).map(r => [r.key, r.value]));
+  let sent = 0;
+
+  const tasksWithDeadline = openTasks.filter(t => t.deadline);
+  const groupedByDate = new Map();
+  for (const task of tasksWithDeadline) {
+    const dayKey = new Date(task.deadline).toISOString().slice(0, 10);
+    if (!groupedByDate.has(dayKey)) groupedByDate.set(dayKey, []);
+    groupedByDate.get(dayKey).push(task);
+  }
+  const cluster = [...groupedByDate.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .find(([, tasks]) => tasks.length >= 3);
+
+  const clusterCooldownActive = wm[DEADLINE_CLUSTER_KEY] && new Date(wm[DEADLINE_CLUSTER_KEY]) > now;
+  if (cluster && !clusterCooldownActive) {
+    const [dayKey, tasks] = cluster;
+    const preview = tasks.slice(0, 5).map(t => `• ${t.title}`).join('\n');
+    await sendMessage(
+      CHAT_ID,
+      `🧭 *Proactive insight*\n\nYou have ${tasks.length} tasks clustering on ${dayKey}.\nPrioritize top 1-2 now to avoid last-minute stress.\n\n${preview}`
+    );
+    await upsertWorkingMemoryCooldown(DEADLINE_CLUSTER_KEY, DEADLINE_CLUSTER_COOLDOWN_HOURS);
+    sent++;
+  }
+
+  const highPriorityCount = openTasks.filter(t => (t.tier || 3) <= 2).length;
+  const overcommit = openTasks.length >= 12 || highPriorityCount >= 6;
+  const overcommitCooldownActive = wm[OVERCOMMIT_KEY] && new Date(wm[OVERCOMMIT_KEY]) > now;
+  if (overcommit && !overcommitCooldownActive) {
+    await sendMessage(
+      CHAT_ID,
+      `⚖️ *Proactive insight*\n\nCurrent load looks high (${openTasks.length} open, ${highPriorityCount} high-priority).\nPick one must-win task and postpone one non-critical task today.`
+    );
+    await upsertWorkingMemoryCooldown(OVERCOMMIT_KEY, OVERCOMMIT_COOLDOWN_HOURS);
+    sent++;
+  }
+
+  return sent;
+}
+
+async function maybeSummarizeIdleConversation(now) {
+  const { data: latest, error: latestError } = await supabase
+    .from('episodic_memory')
+    .select('created_at')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (latestError) {
+    console.error('[Proactive] read latest episodic message failed:', latestError.message);
+    throw latestError;
+  }
+  if (!latest?.created_at) return 0;
+
+  const lastMessageAt = new Date(latest.created_at);
+  if ((now - lastMessageAt) < IDLE_SUMMARY_THRESHOLD_MS) return 0;
+
+  const { data: cursorRow, error: cursorError } = await supabase
+    .from('working_memory')
+    .select('value')
+    .eq('key', IDLE_SUMMARY_CURSOR_KEY)
+    .maybeSingle();
+  if (cursorError) {
+    console.error('[Proactive] read idle-summary cursor failed:', cursorError.message);
+    throw cursorError;
+  }
+  if (cursorRow?.value === latest.created_at) return 0;
+
+  const { data: recentEpisodes, error: episodesError } = await supabase
+    .from('episodic_memory')
+    .select('role, content, created_at')
+    .order('created_at', { ascending: false })
+    .limit(24);
+  if (episodesError) {
+    console.error('[Proactive] read recent episodes for idle summary failed:', episodesError.message);
+    throw episodesError;
+  }
+  if (!recentEpisodes || recentEpisodes.length === 0) return 0;
+
+  const ordered = [...recentEpisodes].reverse();
+  let sessionStart = ordered.length - 1;
+  for (let i = ordered.length - 1; i > 0; i--) {
+    const cur = new Date(ordered[i].created_at).getTime();
+    const prev = new Date(ordered[i - 1].created_at).getTime();
+    if ((cur - prev) > SESSION_BREAK_MS) break;
+    sessionStart = i - 1;
+  }
+  const session = ordered.slice(sessionStart);
+  const transcript = session
+    .map(r => `[${r.role}] ${r.content.replace(/\s+/g, ' ').trim().slice(0, 280)}`)
+    .join('\n');
+
+  const idleSummary = await generateResponse(
+    'You summarize personal conversations into durable second-brain notes.',
+    [{
+      role: 'user',
+      content: `Create a concise session summary with:\n1) key decisions\n2) open loops\n3) next-step commitments\n\nSESSION:\n${transcript}`,
+    }],
+    { temperature: 0.3, max_tokens: 300 }
+  );
+
+  const { error: summaryUpsertError } = await supabase
+    .from('core_memory')
+    .upsert(
+      {
+        key: 'last_idle_conversation_summary',
+        value: `[${new Date().toISOString()}]\n${idleSummary.trim()}`,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'key' }
+    );
+  if (summaryUpsertError) {
+    console.error('[Proactive] upsert idle summary failed:', summaryUpsertError.message);
+    throw summaryUpsertError;
+  }
+
+  const { error: cursorUpsertError } = await supabase
+    .from('working_memory')
+    .upsert(
+      {
+        key: IDLE_SUMMARY_CURSOR_KEY,
+        value: latest.created_at,
+      },
+      { onConflict: 'key' }
+    );
+  if (cursorUpsertError) {
+    console.error('[Proactive] update idle-summary cursor failed:', cursorUpsertError.message);
+    throw cursorUpsertError;
+  }
+
+  await sendMessage(CHAT_ID, '🧠 I summarized your last conversation session into memory for future context.');
+  return 1;
+}
+
+async function upsertWorkingMemoryCooldown(key, hours) {
+  const expires = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+  const { error } = await supabase
+    .from('working_memory')
+    .upsert(
+      {
+        key,
+        value: expires,
+        expires_at: expires,
+      },
+      { onConflict: 'key' }
+    );
+  if (error) {
+    console.error('[Proactive] upsert working-memory cooldown failed:', error.message);
+    throw error;
   }
 }
 

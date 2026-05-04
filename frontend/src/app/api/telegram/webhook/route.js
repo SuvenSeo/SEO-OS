@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import supabase from '@/lib/config/supabase';
-import { generateResponse } from '@/lib/services/groq';
+import { generateResponse, generateStructuredExtraction } from '@/lib/services/groq';
 import { sendMessage, sendChatAction } from '@/lib/services/telegram';
 import { getFullPrompt } from '@/lib/services/context';
 import { processExchange, formatSummary } from '@/lib/services/postProcessor';
@@ -8,6 +8,8 @@ import { downloadTelegramFile, readUrl, analyzeImage, parsePdf, parseWord, getBe
 
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const ENTITY_PEOPLE_KEY = 'entity_people';
+const ENTITY_PROJECTS_KEY = 'entity_projects';
 
 /** Inserts a knowledge_base row; logs { error } with source + operation. Returns { error } for callers that need to branch. */
 async function insertKnowledgeBase(row, operation) {
@@ -16,6 +18,104 @@ async function insertKnowledgeBase(row, operation) {
     console.error('[KnowledgeBase]', error, { source: row.source, operation });
   }
   return { error };
+}
+
+function parseStructuredJson(raw, fallback) {
+  try {
+    const cleaned = (raw || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    return JSON.parse(cleaned);
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeEntityName(name) {
+  return (name || '').replace(/\s+/g, ' ').trim();
+}
+
+async function extractEntitiesFromMessage(text) {
+  const prompt = `Extract named entities from this message.
+Return ONLY JSON with shape:
+{
+  "people": [{"name":"", "context":""}],
+  "projects": [{"name":"", "context":""}]
+}
+Rules:
+- Include people names (friends, clients, professors, collaborators).
+- Include project/product/workstream names.
+- Keep context concise (<100 chars).
+- If none, use empty arrays.
+
+MESSAGE:
+"${text}"`;
+
+  const raw = await generateStructuredExtraction(prompt);
+  const parsed = parseStructuredJson(raw, { people: [], projects: [] });
+
+  const people = (Array.isArray(parsed.people) ? parsed.people : [])
+    .map(p => ({ name: normalizeEntityName(p.name), context: (p.context || '').trim() }))
+    .filter(p => p.name.length >= 2 && p.name.length <= 60);
+  const projects = (Array.isArray(parsed.projects) ? parsed.projects : [])
+    .map(p => ({ name: normalizeEntityName(p.name), context: (p.context || '').trim() }))
+    .filter(p => p.name.length >= 2 && p.name.length <= 80);
+
+  return { people, projects };
+}
+
+async function upsertEntityMemory(key, entities) {
+  if (!entities.length) return;
+
+  const { data: existing, error: readError } = await supabase
+    .from('core_memory')
+    .select('value')
+    .eq('key', key)
+    .maybeSingle();
+  if (readError) throw readError;
+
+  const map = new Map();
+  const existingLines = (existing?.value || '').split('\n').map(x => x.trim()).filter(Boolean);
+  for (const line of existingLines) {
+    const [name, context = '', lastSeen = ''] = line.split('|').map(s => s.trim());
+    if (!name) continue;
+    map.set(name.toLowerCase(), { name, context, lastSeen });
+  }
+
+  const now = new Date().toISOString();
+  for (const entity of entities) {
+    const id = entity.name.toLowerCase();
+    const prior = map.get(id);
+    map.set(id, {
+      name: entity.name,
+      context: entity.context || prior?.context || '',
+      lastSeen: now,
+    });
+  }
+
+  const merged = [...map.values()]
+    .slice(-80)
+    .map(e => `${e.name} | ${e.context || '-'} | ${e.lastSeen}`)
+    .join('\n');
+
+  const { error: upsertError } = await supabase
+    .from('core_memory')
+    .upsert(
+      {
+        key,
+        value: merged,
+        updated_at: now,
+      },
+      { onConflict: 'key' }
+    );
+  if (upsertError) throw upsertError;
+}
+
+async function trackEntitiesInBackground(text) {
+  if (!text || text.length < 4) return;
+  const entities = await extractEntitiesFromMessage(text);
+  await Promise.all([
+    upsertEntityMemory(ENTITY_PEOPLE_KEY, entities.people),
+    upsertEntityMemory(ENTITY_PROJECTS_KEY, entities.projects),
+  ]);
 }
 
 export async function GET(request) {
@@ -360,6 +460,7 @@ async function handleMessage(chatId, text, messageId) {
         return sendMessage(chatId, summaryText);
       }
     }).catch(err => console.error('[Telegram] Post-processor error:', err.message)),
+    trackEntitiesInBackground(processedText).catch(err => console.error('[Telegram] Entity tracking error:', err.message)),
   ]);
 }
 
