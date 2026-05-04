@@ -10,6 +10,7 @@ const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOK
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const ENTITY_PEOPLE_KEY = 'entity_people';
 const ENTITY_PROJECTS_KEY = 'entity_projects';
+const MOOD_TRACKING_COOLDOWN_KEY = 'mood_tracking_last_at';
 
 /** Inserts a knowledge_base row; logs { error } with source + operation. Returns { error } for callers that need to branch. */
 async function insertKnowledgeBase(row, operation) {
@@ -116,6 +117,55 @@ async function trackEntitiesInBackground(text) {
     upsertEntityMemory(ENTITY_PEOPLE_KEY, entities.people),
     upsertEntityMemory(ENTITY_PROJECTS_KEY, entities.projects),
   ]);
+}
+
+async function detectMoodSignal(text) {
+  const raw = await generateStructuredExtraction(`Detect emotional signal from this message.
+Return JSON only:
+{
+  "mood": "positive|neutral|stressed|frustrated|anxious|focused|excited|overwhelmed|sad",
+  "intensity": "low|medium|high",
+  "confidence": "low|medium|high",
+  "observation": "short first-person-relevant pattern note"
+}
+
+MESSAGE:
+"${text}"`);
+
+  return parseStructuredJson(raw, {
+    mood: 'neutral',
+    intensity: 'low',
+    confidence: 'low',
+    observation: '',
+  });
+}
+
+async function trackMoodInBackground(text) {
+  if (!text || text.length < 8) return;
+
+  const now = new Date();
+  const { data: cooldown } = await supabase
+    .from('working_memory')
+    .select('value')
+    .eq('key', MOOD_TRACKING_COOLDOWN_KEY)
+    .maybeSingle();
+  if (cooldown?.value && new Date(cooldown.value) > now) return;
+
+  const mood = await detectMoodSignal(text);
+  if (!mood || mood.mood === 'neutral' || mood.confidence === 'low') return;
+
+  const confidence = mood.confidence === 'high' ? 'high' : 'medium';
+  const observation = `[mood:${mood.mood}|${mood.intensity}] ${mood.observation || 'Emotional signal detected from latest user message.'}`;
+  const { error } = await supabase.from('patterns').insert({ observation, confidence });
+  if (error) throw error;
+
+  const nextTrackAt = new Date(Date.now() + 90 * 60 * 1000).toISOString();
+  await supabase
+    .from('working_memory')
+    .upsert(
+      { key: MOOD_TRACKING_COOLDOWN_KEY, value: nextTrackAt, expires_at: nextTrackAt },
+      { onConflict: 'key' }
+    );
 }
 
 export async function GET(request) {
@@ -599,6 +649,7 @@ async function handleMessage(chatId, text, messageId) {
       }
     }).catch(err => console.error('[Telegram] Post-processor error:', err.message)),
     trackEntitiesInBackground(processedText).catch(err => console.error('[Telegram] Entity tracking error:', err.message)),
+    trackMoodInBackground(processedText).catch(err => console.error('[Telegram] Mood tracking error:', err.message)),
   ]);
 }
 

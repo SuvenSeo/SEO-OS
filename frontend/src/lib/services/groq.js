@@ -86,11 +86,40 @@ async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
 
 // ─── Main generate function ───────────────────────────────────────────────────
 const PRIMARY_CHAT_MODEL = 'llama-3.3-70b-versatile';
+const QUICK_MODEL = 'llama-3.1-8b-instant';
+const CODE_MODEL = process.env.GROQ_CODE_MODEL || 'qwen-2.5-coder-32b';
 const FALLBACK_MODEL = 'llama3-70b-8192';
 const EXTRACTION_MODEL = 'llama-3.1-8b-instant';
 
+function classifyModelRoute(messages = []) {
+  const lastUserMessage = [...messages].reverse().find(m => m.role === 'user')?.content || '';
+  const text = lastUserMessage.toLowerCase();
+
+  const creativeHints = ['poem', 'story', 'caption', 'creative', 'rewrite this nicely', 'brainstorm names'];
+  const codeHints = ['code', 'bug', 'debug', 'stack trace', 'api route', 'function', 'typescript', 'javascript', 'sql', 'regex', 'refactor'];
+  const deepHints = ['strategy', 'roadmap', 'tradeoff', 'analyze', 'architecture', 'plan', 'compare'];
+
+  if (creativeHints.some(h => text.includes(h))) {
+    return { type: 'creative', model: null };
+  }
+  if (codeHints.some(h => text.includes(h)) || /```[\s\S]*```/.test(lastUserMessage)) {
+    return { type: 'code', model: CODE_MODEL };
+  }
+  if (deepHints.some(h => text.includes(h)) || lastUserMessage.length > 220) {
+    return { type: 'deep', model: PRIMARY_CHAT_MODEL };
+  }
+  return { type: 'quick', model: QUICK_MODEL };
+}
+
 export async function generateResponse(systemPrompt, messages, options = {}) {
-  const { model = PRIMARY_CHAT_MODEL, temperature = 0.7, max_tokens = 1500 } = options;
+  const { temperature = 0.7, max_tokens = 1500 } = options;
+  const route = options.model ? { type: 'manual', model: options.model } : classifyModelRoute(messages);
+
+  if (route.type === 'creative') {
+    return generateWithGemini(systemPrompt, messages, temperature);
+  }
+
+  let model = route.model || PRIMARY_CHAT_MODEL;
 
   const fullMessages = [
     { role: 'system', content: systemPrompt },
@@ -110,6 +139,11 @@ export async function generateResponse(systemPrompt, messages, options = {}) {
       });
       return completion.choices[0]?.message?.content || '';
     } catch (error) {
+      if ((error.status === 400 || error.status === 404) && model !== PRIMARY_CHAT_MODEL) {
+        console.warn(`[Groq] Model ${model} unavailable, falling back to ${PRIMARY_CHAT_MODEL}`);
+        model = PRIMARY_CHAT_MODEL;
+        continue;
+      }
       if (error.status === 429 || error.status === 503) {
         // Parse reset time from error if available, default 1 hour
         const resetMs = 60 * 60 * 1000;

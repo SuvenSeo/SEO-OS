@@ -1,4 +1,5 @@
 import supabase from '../config/supabase.js';
+import { generateStructuredExtraction } from './groq.js';
 
 // ─── Simple in-memory cache ───────────────────────────────────────────────────
 const _cache = {};
@@ -21,19 +22,57 @@ const MEANINGFUL_HINTS = [
   'meeting', 'decide', 'decision', 'priority', 'plan', 'commit',
 ];
 
-async function fetchRelevantKnowledge(keywords) {
+async function rerankKnowledgeSemantically(userMessage, candidates) {
+  if (!candidates || candidates.length <= 1) return (candidates || []).slice(0, 5);
+
+  const shortlist = candidates.slice(0, 12);
+  const candidateText = shortlist
+    .map((c, i) => `${i + 1}. [${c.source}] ${c.content.replace(/\s+/g, ' ').trim().slice(0, 240)}`)
+    .join('\n\n');
+
+  const raw = await generateStructuredExtraction(`Pick the most semantically relevant knowledge entries for the query.
+Return JSON only:
+{
+  "top_indexes": [1, 2, 3, 4, 5]
+}
+Rules:
+- Indexes refer to the numbered list below.
+- Prefer entries that answer intent, not keyword overlap.
+- Return up to 5 indexes, most relevant first.
+
+USER QUERY:
+${userMessage}
+
+CANDIDATES:
+${candidateText}`);
+
+  try {
+    const parsed = JSON.parse((raw || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
+    const indexes = Array.isArray(parsed.top_indexes) ? parsed.top_indexes : [];
+    const picked = indexes
+      .map(n => shortlist[Number(n) - 1])
+      .filter(Boolean);
+    if (picked.length > 0) return picked.slice(0, 5);
+  } catch (error) {
+    console.warn('[Context] semantic rerank parse failed:', error.message);
+  }
+
+  return shortlist.slice(0, 5);
+}
+
+async function fetchRelevantKnowledge(userMessage, keywords) {
   const ftsQuery = keywords.join(' | ');
   const baseQuery = supabase
     .from('knowledge_base')
     .select('content, source, created_at')
     .order('created_at', { ascending: false })
-    .limit(5);
+    .limit(12);
 
   const { data: ftsRows, error: ftsError } = await baseQuery
     .textSearch('fts', ftsQuery, { type: 'plain', config: 'english' });
 
   if (!ftsError) {
-    return ftsRows || [];
+    return rerankKnowledgeSemantically(userMessage, ftsRows || []);
   }
 
   const message = (ftsError.message || '').toLowerCase();
@@ -57,14 +96,14 @@ async function fetchRelevantKnowledge(keywords) {
     .select('content, source, created_at')
     .or(fallbackFilter)
     .order('created_at', { ascending: false })
-    .limit(5);
+    .limit(12);
 
   if (fallbackError) {
     console.error('[Context] knowledge fallback query failed:', fallbackError.message);
     return [];
   }
 
-  return fallbackRows || [];
+  return rerankKnowledgeSemantically(userMessage, fallbackRows || []);
 }
 
 function compressVerboseContent(content = '') {
@@ -230,7 +269,7 @@ async function buildContext(userMessage = '') {
       .slice(0, 8);
 
     if (keywords.length > 0) {
-      const knowledge = await fetchRelevantKnowledge(keywords);
+      const knowledge = await fetchRelevantKnowledge(userMessage, keywords);
 
       if (knowledge.length > 0) {
         const knowledgeStr = knowledge
