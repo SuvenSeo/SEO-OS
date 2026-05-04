@@ -11,6 +11,8 @@ export default function Dashboard() {
   const [tasks, setTasks] = useState([]);
   const [reminders, setReminders] = useState([]);
   const [ideas, setIdeas] = useState([]);
+  const [goals, setGoals] = useState([]);
+  const [habits, setHabits] = useState([]);
   const [chatInput, setChatInput] = useState('');
   const [chatResponse, setChatResponse] = useState('');
   const [loading, setLoading] = useState(true);
@@ -22,14 +24,18 @@ export default function Dashboard() {
 
   async function loadDashboard() {
     try {
-      const [tasksRes, remindersRes, ideasRes] = await Promise.all([
+      const [tasksRes, remindersRes, ideasRes, goalsRes, habitsRes] = await Promise.all([
         api.tasks.list({ status: 'open' }),
         api.reminders.list({ fired: 'false' }),
         api.ideas.list({ status: 'raw' }),
+        api.goals.list({ status: 'active' }),
+        api.habits.list({ status: 'active' }),
       ]);
       setTasks(tasksRes.tasks || []);
       setReminders(remindersRes.reminders || []);
       setIdeas(ideasRes.ideas || []);
+      setGoals(goalsRes.goals || []);
+      setHabits(habitsRes.habits || []);
     } catch (e) {
       console.error('Dashboard load error:', e);
     } finally {
@@ -75,6 +81,8 @@ export default function Dashboard() {
     { label: 'Due Today', value: dueToday.length, color: '#f59e0b' },
     { label: 'Reminders', value: reminders.length, color: '#3b82f6' },
     { label: 'Raw Ideas', value: ideas.length, color: '#a855f7' },
+    { label: 'Active Goals', value: goals.length, color: '#22c55e' },
+    { label: 'Active Habits', value: habits.length, color: '#14b8a6' },
   ];
 
   return (
@@ -92,7 +100,7 @@ export default function Dashboard() {
       </motion.div>
 
       {/* Stats Row */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
         {stats.map((stat, i) => (
           <motion.div
             key={stat.label}
@@ -205,6 +213,46 @@ export default function Dashboard() {
             </div>
           )}
         </motion.div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="glass-card p-6">
+          <h2 className="text-lg font-semibold tracking-[-0.02em] mb-4">Goals Snapshot</h2>
+          {loading ? (
+            <div className="h-20 rounded-xl bg-[var(--bg-surface)] animate-pulse" />
+          ) : goals.length === 0 ? (
+            <p className="text-sm text-[var(--text-muted)]">No active goals yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {goals.slice(0, 4).map((goal) => (
+                <div key={goal.id} className="px-3 py-2 rounded-xl bg-[var(--bg-surface)] text-sm">
+                  <div className="flex justify-between">
+                    <span className="truncate">{goal.title}</span>
+                    <span className="text-[var(--text-muted)]">{goal.progress || 0}%</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="glass-card p-6">
+          <h2 className="text-lg font-semibold tracking-[-0.02em] mb-4">Habits Snapshot</h2>
+          {loading ? (
+            <div className="h-20 rounded-xl bg-[var(--bg-surface)] animate-pulse" />
+          ) : habits.length === 0 ? (
+            <p className="text-sm text-[var(--text-muted)]">No active habits yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {habits.slice(0, 4).map((habit) => (
+                <div key={habit.id} className="px-3 py-2 rounded-xl bg-[var(--bg-surface)] text-sm flex justify-between">
+                  <span className="truncate">{habit.name}</span>
+                  <span className="text-[var(--text-muted)]">🔥 {habit.current_streak || 0}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Quick Chat */}

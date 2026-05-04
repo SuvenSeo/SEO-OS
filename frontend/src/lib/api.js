@@ -59,6 +59,24 @@ export const api = {
   patterns: {
     list: (params) => request('/api/patterns', { params }),
   },
+  goals: {
+    list: (params) => request('/api/goals', { params }),
+    create: (body) => request('/api/goals', { method: 'POST', body }),
+    update: (id, body) => request(`/api/goals/${id}`, { method: 'PATCH', body }),
+    delete: (id) => request(`/api/goals/${id}`, { method: 'DELETE' }),
+  },
+  projects: {
+    list: (params) => request('/api/projects', { params }),
+    create: (body) => request('/api/projects', { method: 'POST', body }),
+    update: (id, body) => request(`/api/projects/${id}`, { method: 'PATCH', body }),
+    delete: (id) => request(`/api/projects/${id}`, { method: 'DELETE' }),
+  },
+  habits: {
+    list: (params) => request('/api/habits', { params }),
+    create: (body) => request('/api/habits', { method: 'POST', body }),
+    update: (id, body) => request(`/api/habits/${id}`, { method: 'PATCH', body }),
+    delete: (id) => request(`/api/habits/${id}`, { method: 'DELETE' }),
+  },
   config: {
     list: () => request('/api/config'),
     get: (key) => request(`/api/config/${key}`),
