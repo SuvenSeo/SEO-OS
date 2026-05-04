@@ -232,6 +232,12 @@ export async function POST(req) {
 }
 
 async function handleUpdate(update) {
+  const callback = update.callback_query;
+  if (callback) {
+    await handleCallbackQuery(callback);
+    return;
+  }
+
   const msg = update.message;
   if (!msg) return;
 
@@ -272,6 +278,138 @@ async function handleUpdate(update) {
   }
 
   await handleMessage(chatId, text, messageId);
+}
+
+async function handleCallbackQuery(callback) {
+  const data = callback.data || '';
+  const callbackId = callback.id;
+  const chatId = callback.message?.chat?.id?.toString();
+  const msgId = callback.message?.message_id;
+
+  if (!chatId || chatId !== TELEGRAM_CHAT_ID) {
+    await answerCallbackQuery(callbackId, 'Unauthorized');
+    return;
+  }
+
+  try {
+    if (data.startsWith('task_done:')) {
+      const taskId = data.split(':')[1];
+      const { error } = await supabase
+        .from('tasks')
+        .update({ status: 'done', updated_at: new Date().toISOString() })
+        .eq('id', taskId);
+      if (error) throw error;
+      await answerCallbackQuery(callbackId, 'Task marked done');
+      await clearCallbackKeyboard(chatId, msgId);
+      return;
+    }
+
+    if (data.startsWith('task_snooze:')) {
+      const [, taskId, hoursRaw] = data.split(':');
+      const hours = Number(hoursRaw) || 1;
+      const { data: task, error: taskError } = await supabase
+        .from('tasks')
+        .select('title')
+        .eq('id', taskId)
+        .maybeSingle();
+      if (taskError) throw taskError;
+      if (!task?.title) throw new Error('Task not found');
+
+      const triggerAt = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+      const { error: reminderError } = await supabase
+        .from('reminders')
+        .insert({
+          message: `Follow up: ${task.title}`,
+          trigger_at: triggerAt,
+          tier: 2,
+          tier_reason: `Snoozed from inline action (${hours}h)`,
+          fired: false,
+        });
+      if (reminderError) throw reminderError;
+
+      const { error: statusError } = await supabase
+        .from('tasks')
+        .update({ status: 'snoozed', updated_at: new Date().toISOString() })
+        .eq('id', taskId);
+      if (statusError) throw statusError;
+
+      await answerCallbackQuery(callbackId, `Snoozed ${hours}h`);
+      await clearCallbackKeyboard(chatId, msgId);
+      return;
+    }
+
+    if (data.startsWith('reminder_snooze:')) {
+      const [, reminderId, hoursRaw] = data.split(':');
+      const hours = Number(hoursRaw) || 1;
+      const nextTrigger = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
+      if (reminderId === 'morning_brief') {
+        const { error } = await supabase
+          .from('working_memory')
+          .upsert(
+            {
+              key: 'morning_brief_nudge_at',
+              value: nextTrigger,
+              expires_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+            },
+            { onConflict: 'key' }
+          );
+        if (error) throw error;
+      } else {
+        const { error } = await supabase
+          .from('reminders')
+          .update({ trigger_at: nextTrigger, fired: false })
+          .eq('id', reminderId);
+        if (error) throw error;
+      }
+
+      await answerCallbackQuery(callbackId, `Reminder snoozed ${hours}h`);
+      await clearCallbackKeyboard(chatId, msgId);
+      return;
+    }
+
+    if (data === 'brief_ack') {
+      const { error } = await supabase
+        .from('working_memory')
+        .upsert(
+          { key: 'morning_brief_replied', value: 'true' },
+          { onConflict: 'key' }
+        );
+      if (error) throw error;
+      await answerCallbackQuery(callbackId, 'Acknowledged');
+      await clearCallbackKeyboard(chatId, msgId);
+      return;
+    }
+
+    await answerCallbackQuery(callbackId, 'Unknown action');
+  } catch (error) {
+    console.error('[Telegram] Callback handling error:', error.message);
+    await answerCallbackQuery(callbackId, 'Action failed');
+  }
+}
+
+async function answerCallbackQuery(callbackQueryId, text) {
+  await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      callback_query_id: callbackQueryId,
+      text,
+      show_alert: false,
+    }),
+  });
+}
+
+async function clearCallbackKeyboard(chatId, messageId) {
+  if (!chatId || !messageId) return;
+  await fetch(`${TELEGRAM_API}/editMessageReplyMarkup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: { inline_keyboard: [] },
+    }),
+  });
 }
 
 async function handlePhoto(chatId, msg, messageId) {

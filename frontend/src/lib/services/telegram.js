@@ -9,7 +9,7 @@ const MAX_MESSAGE_LENGTH = 4096;
  * @param {object} options - Optional: parse_mode, reply_to_message_id
  */
 export async function sendMessage(chatId, text, options = {}) {
-  const { parse_mode = 'Markdown', reply_to_message_id } = options;
+  const { parse_mode = 'Markdown', reply_to_message_id, reply_markup } = options;
   const targetChatId = chatId || process.env.TELEGRAM_CHAT_ID;
 
   if (!text || text.trim().length === 0) {
@@ -21,7 +21,8 @@ export async function sendMessage(chatId, text, options = {}) {
   const chunks = splitMessage(text, MAX_MESSAGE_LENGTH);
 
   let lastResult = null;
-  for (const chunk of chunks) {
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
     try {
       const body = {
         chat_id: targetChatId,
@@ -31,6 +32,9 @@ export async function sendMessage(chatId, text, options = {}) {
 
       if (reply_to_message_id) {
         body.reply_to_message_id = reply_to_message_id;
+      }
+      if (reply_markup && i === 0) {
+        body.reply_markup = reply_markup;
       }
 
       const response = await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -51,6 +55,7 @@ export async function sendMessage(chatId, text, options = {}) {
             body: JSON.stringify({
               chat_id: targetChatId,
               text: chunk,
+              ...(reply_markup && i === 0 ? { reply_markup } : {}),
             }),
           });
           lastResult = await retryResp.json();

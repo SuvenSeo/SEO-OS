@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import supabase from '@/lib/config/supabase';
-import { generateResponse } from '@/lib/services/groq';
+import { generateResponse, generateStructuredExtraction } from '@/lib/services/groq';
 import { sendMessage } from '@/lib/services/telegram';
 import { getFullPrompt } from '@/lib/services/context';
 
@@ -20,6 +20,10 @@ const OVERCOMMIT_COOLDOWN_HOURS = 10;
 const DEADLINE_CLUSTER_KEY = 'insight_deadline_cluster_sent_until';
 const OVERCOMMIT_KEY = 'insight_overcommit_sent_until';
 const IDLE_SUMMARY_CURSOR_KEY = 'idle_summary_last_message_at';
+const GOOGLE_CALENDAR_TOKEN = process.env.GOOGLE_CALENDAR_ACCESS_TOKEN || '';
+const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || 'primary';
+const GMAIL_ACCESS_TOKEN = process.env.GMAIL_ACCESS_TOKEN || '';
+const GMAIL_USER_ID = process.env.GMAIL_USER_ID || 'me';
 
 export async function GET(request) {
   const auth = resolveCronAuth(request);
@@ -47,6 +51,10 @@ export async function GET(request) {
         await triggerWeeklyReview();
         return NextResponse.json({ ok: true, action: 'weekly-review' });
 
+      case 'email-digest':
+        await triggerEmailDigest();
+        return NextResponse.json({ ok: true, action: 'email-digest' });
+
       case 'memory-prune':
         return NextResponse.json({
           ok: true,
@@ -73,11 +81,12 @@ async function triggerMorningBrief() {
   const tomorrow = new Date(today);
   tomorrow.setDate(tomorrow.getDate() + 1);
 
-  const [{ data: tasks }, { data: patterns }, { data: todayReminders }] = await Promise.all([
+  const [{ data: tasks }, { data: patterns }, { data: todayReminders }, todayEvents] = await Promise.all([
     supabase.from('tasks').select('*').eq('status', 'open').order('priority'),
     supabase.from('patterns').select('*').order('created_at', { ascending: false }).limit(3),
     supabase.from('reminders').select('*').eq('fired', false)
       .gte('trigger_at', today.toISOString()).lte('trigger_at', tomorrow.toISOString()),
+    fetchTodayCalendarEvents(today, tomorrow),
   ]);
 
   const allTasks = tasks || [];
@@ -96,13 +105,23 @@ ${allTasks.slice(0, 8).map(t => `→ P${t.priority}: ${t.title}`).join('\n')}
 
 ${(patterns || []).length > 0 ? `PATTERNS:\n${patterns.map(p => `→ [${p.confidence}] ${p.observation}`).join('\n')}\n` : ''}
 ${(todayReminders || []).length > 0 ? `REMINDERS TODAY:\n${todayReminders.map(r => `→ ${r.message}`).join('\n')}\n` : ''}
+${todayEvents.length > 0 ? `CALENDAR TODAY:\n${todayEvents.map(e => `→ ${e.start}: ${e.summary}`).join('\n')}\n` : ''}
 End with one direct question about today's priority.`;
 
   const brief = await generateResponse(systemPrompt, [{ role: 'user', content: briefPrompt }], {
     temperature: 0.5, max_tokens: 1024,
   });
 
-  await sendMessage(CHAT_ID, brief);
+  await sendMessage(CHAT_ID, brief, {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '✅ Acknowledge', callback_data: 'brief_ack' },
+          { text: '⏳ Remind in 1h', callback_data: 'reminder_snooze:morning_brief:1' },
+        ],
+      ],
+    },
+  });
 
   // Set nudge flags
   const nudgeAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
@@ -168,7 +187,9 @@ async function checkRemindersAndTasks() {
 
   for (const r of (reminders || [])) {
     const followUp = getFollowUpQuestion(r.tier);
-    await sendMessage(CHAT_ID, `⏰ *REMINDER (Tier ${r.tier})*\n\n${r.message}\n\n_${followUp}_`);
+    await sendMessage(CHAT_ID, `⏰ *REMINDER (Tier ${r.tier})*\n\n${r.message}\n\n_${followUp}_`, {
+      reply_markup: buildReminderActionKeyboard(r.id),
+    });
     await supabase.from('reminders').update({ fired: true, last_notified_at: now.toISOString() }).eq('id', r.id);
     fired++;
   }
@@ -185,7 +206,9 @@ async function checkRemindersAndTasks() {
         msg += `\nDue: ${new Date(t.deadline).toLocaleString('en-US', { timeZone: 'Asia/Colombo', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`;
       }
       msg += `\n\n_${followUp}_`;
-      await sendMessage(CHAT_ID, msg);
+      await sendMessage(CHAT_ID, msg, {
+        reply_markup: buildTaskActionKeyboard(t.id),
+      });
       await supabase.from('tasks').update({
         last_notified_at: now.toISOString(),
         follow_up_count: (t.follow_up_count || 0) + 1,
@@ -210,7 +233,9 @@ async function checkRemindersAndTasks() {
       ? `Task "${t.title}" is ${daysLate}d overdue. Status?`
       : `You've avoided "${t.title}" for ${daysLate} days (${followUps}x followed up). What's actually blocking this?`;
 
-    await sendMessage(CHAT_ID, `⚠️ *ACCOUNTABILITY*\n\n${tone}`);
+    await sendMessage(CHAT_ID, `⚠️ *ACCOUNTABILITY*\n\n${tone}`, {
+      reply_markup: buildTaskActionKeyboard(t.id),
+    });
     await supabase.from('tasks').update({
       follow_up_count: followUps + 1,
       last_notified_at: now.toISOString(),
@@ -257,6 +282,32 @@ Write a direct, honest paragraph about the week. Then list 3-5 specific intentio
   });
 
   await sendMessage(CHAT_ID, `📊 *WEEKLY REVIEW*\n\n${review}`);
+}
+
+async function triggerEmailDigest() {
+  const emails = await fetchImportantEmails();
+  if (emails.length === 0) {
+    await sendMessage(CHAT_ID, '📬 No unread important emails found right now.');
+    return;
+  }
+
+  const emailBlock = emails
+    .map((e, idx) => `${idx + 1}. ${e.subject} — ${e.from}\n${e.snippet}`)
+    .join('\n\n');
+
+  const digest = await generateResponse(
+    'You summarize inbox items for an executive assistant.',
+    [{ role: 'user', content: `Summarize these emails in concise bullets and highlight urgency:\n\n${emailBlock}` }],
+    { temperature: 0.3, max_tokens: 500 }
+  );
+
+  const actionItems = await extractEmailActionItems(emails);
+  const created = await createTasksFromEmailActions(actionItems);
+
+  await sendMessage(
+    CHAT_ID,
+    `📬 *EMAIL DIGEST*\n\n${digest}\n\n_${created} action task(s) added from emails._`
+  );
 }
 
 function resolveCronAuth(request) {
@@ -641,6 +692,152 @@ async function upsertWorkingMemoryCooldown(key, hours) {
     console.error('[Proactive] upsert working-memory cooldown failed:', error.message);
     throw error;
   }
+}
+
+function buildTaskActionKeyboard(taskId) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ Done', callback_data: `task_done:${taskId}` },
+        { text: '😴 Snooze 1h', callback_data: `task_snooze:${taskId}:1` },
+      ],
+      [
+        { text: '📅 Snooze 12h', callback_data: `task_snooze:${taskId}:12` },
+      ],
+    ],
+  };
+}
+
+function buildReminderActionKeyboard(reminderId) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '😴 Snooze 1h', callback_data: `reminder_snooze:${reminderId}:1` },
+        { text: '📅 Snooze 12h', callback_data: `reminder_snooze:${reminderId}:12` },
+      ],
+    ],
+  };
+}
+
+async function fetchTodayCalendarEvents(start, end) {
+  if (!GOOGLE_CALENDAR_TOKEN) return [];
+
+  const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(GOOGLE_CALENDAR_ID)}/events`);
+  url.searchParams.set('timeMin', start.toISOString());
+  url.searchParams.set('timeMax', end.toISOString());
+  url.searchParams.set('singleEvents', 'true');
+  url.searchParams.set('orderBy', 'startTime');
+  url.searchParams.set('maxResults', '6');
+
+  const response = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${GOOGLE_CALENDAR_TOKEN}` },
+  });
+  if (!response.ok) {
+    console.warn('[Proactive] Calendar fetch failed:', response.status);
+    return [];
+  }
+
+  const data = await response.json();
+  return (data.items || []).map(item => ({
+    summary: item.summary || '(Untitled)',
+    start: (item.start?.dateTime || item.start?.date || '').replace('T', ' ').slice(0, 16),
+  }));
+}
+
+async function fetchImportantEmails() {
+  if (!GMAIL_ACCESS_TOKEN) return [];
+
+  const listUrl = new URL(`https://gmail.googleapis.com/gmail/v1/users/${encodeURIComponent(GMAIL_USER_ID)}/messages`);
+  listUrl.searchParams.set('q', 'is:unread category:primary newer_than:3d');
+  listUrl.searchParams.set('maxResults', '8');
+
+  const listResp = await fetch(listUrl.toString(), {
+    headers: { Authorization: `Bearer ${GMAIL_ACCESS_TOKEN}` },
+  });
+  if (!listResp.ok) {
+    console.warn('[Proactive] Gmail list fetch failed:', listResp.status);
+    return [];
+  }
+
+  const listData = await listResp.json();
+  const messages = listData.messages || [];
+  const emails = [];
+
+  for (const msg of messages) {
+    const msgResp = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/${encodeURIComponent(GMAIL_USER_ID)}/messages/${msg.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`,
+      { headers: { Authorization: `Bearer ${GMAIL_ACCESS_TOKEN}` } }
+    );
+    if (!msgResp.ok) continue;
+    const payload = await msgResp.json();
+    const headers = payload.payload?.headers || [];
+    const from = headers.find(h => h.name === 'From')?.value || 'Unknown sender';
+    const subject = headers.find(h => h.name === 'Subject')?.value || '(No subject)';
+    emails.push({
+      id: msg.id,
+      from,
+      subject,
+      snippet: payload.snippet || '',
+    });
+  }
+
+  return emails;
+}
+
+async function extractEmailActionItems(emails) {
+  if (emails.length === 0) return [];
+  const payload = emails
+    .map((e, idx) => `${idx + 1}. Subject: ${e.subject}\nFrom: ${e.from}\nSnippet: ${e.snippet}`)
+    .join('\n\n');
+
+  const raw = await generateStructuredExtraction(`Extract action items from these emails.
+Return JSON:
+{
+  "action_items": [
+    { "title": "short action", "description": "details", "priority": 1-5 }
+  ]
+}
+Only include concrete actions.
+
+EMAILS:
+${payload}`);
+
+  try {
+    const parsed = JSON.parse((raw || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
+    return Array.isArray(parsed.action_items) ? parsed.action_items : [];
+  } catch {
+    return [];
+  }
+}
+
+async function createTasksFromEmailActions(items) {
+  if (!items.length) return 0;
+
+  const { data: existing } = await supabase.from('tasks').select('title').in('status', ['open', 'snoozed']);
+  const existingTitles = new Set((existing || []).map(t => t.title.toLowerCase().trim()));
+
+  let created = 0;
+  for (const item of items) {
+    const title = (item.title || '').trim();
+    if (!title) continue;
+    const id = title.toLowerCase();
+    if (existingTitles.has(id)) continue;
+
+    const { error } = await supabase.from('tasks').insert({
+      title,
+      description: item.description || 'Auto-created from email digest',
+      priority: Number(item.priority) >= 1 && Number(item.priority) <= 5 ? Number(item.priority) : 3,
+      status: 'open',
+      source: 'auto-detected',
+      tier: 2,
+      tier_reason: 'Extracted from important unread email',
+    });
+    if (!error) {
+      created++;
+      existingTitles.add(id);
+    }
+  }
+  return created;
 }
 
 async function pruneEpisodicMemory() {
