@@ -1,4 +1,6 @@
 const API_URL = '';
+// SECURITY: NEXT_PUBLIC_CRON_SECRET is embedded in the browser bundle — treat it as public.
+// Prefer dedicated dashboard auth later; removing this would break dashboard API calls until replaced.
 const TOKEN = process.env.NEXT_PUBLIC_CRON_SECRET || '';
 
 async function request(path, options = {}) {

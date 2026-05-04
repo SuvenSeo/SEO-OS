@@ -144,10 +144,13 @@ INSERT INTO agent_config (key, value) VALUES (
 -- ============================================================
 CREATE TABLE knowledge_base (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  source            TEXT NOT NULL CHECK (source IN ('whatsapp_import', 'telegram_saved', 'manual')),
+  source            TEXT NOT NULL CHECK (source IN (
+    'whatsapp_import', 'telegram_saved', 'manual',
+    'image', 'document', 'secure_note', 'user_link', 'research'
+  )),
   content           TEXT NOT NULL,
   embedding_summary TEXT,
-  fts               TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+  fts               TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

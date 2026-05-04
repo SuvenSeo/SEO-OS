@@ -7,11 +7,18 @@ import { getFullPrompt } from '@/lib/services/context';
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const CRON_SECRET = process.env.CRON_SECRET;
 
-// Vercel Cron hits this every 5 minutes
+/** Max episodic_memory rows to keep (oldest removed by daily cron). */
+const EPISODIC_MEMORY_RETENTION = 1500;
+
+// Vercel: set CRON_SECRET in Production — platform sends Authorization: Bearer <CRON_SECRET>.
+// Crons run on Production only. Hobby plan allows at most one cron invocation per day per job;
+// sub-daily schedules (e.g. */5) require a paid plan — see https://vercel.com/docs/cron-jobs/usage-and-pricing
 export async function GET(request) {
-  // Auth check
   const authHeader = request.headers.get('authorization');
-  if (authHeader !== `Bearer ${CRON_SECRET}`) {
+  if (!CRON_SECRET || authHeader !== `Bearer ${CRON_SECRET}`) {
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('[Proactive] 401:', !CRON_SECRET ? 'missing CRON_SECRET env' : 'authorization mismatch');
+    }
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
@@ -31,6 +38,11 @@ export async function GET(request) {
       case 'weekly-review':
         await triggerWeeklyReview();
         return NextResponse.json({ ok: true, action: 'weekly-review' });
+
+      case 'memory-prune': {
+        const { deleted } = await pruneEpisodicMemory();
+        return NextResponse.json({ ok: true, action: 'memory-prune', deleted });
+      }
 
       case 'reminder-check':
       default:
@@ -229,6 +241,18 @@ Write a direct, honest paragraph about the week. Then list 3-5 specific intentio
   });
 
   await sendMessage(CHAT_ID, `📊 *WEEKLY REVIEW*\n\n${review}`);
+}
+
+async function pruneEpisodicMemory() {
+  const { data, error } = await supabase.rpc('prune_episodic_memory', {
+    p_keep: EPISODIC_MEMORY_RETENTION,
+  });
+  if (error) {
+    console.error('[Proactive] pruneEpisodicMemory:', error.message);
+    throw error;
+  }
+  const deleted = typeof data === 'number' ? data : Number(data) || 0;
+  return { deleted };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

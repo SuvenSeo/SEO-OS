@@ -9,6 +9,15 @@ import { downloadTelegramFile, readUrl, analyzeImage, parsePdf, parseWord, getBe
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+/** Inserts a knowledge_base row; logs { error } with source + operation. Returns { error } for callers that need to branch. */
+async function insertKnowledgeBase(row, operation) {
+  const { error } = await supabase.from('knowledge_base').insert(row);
+  if (error) {
+    console.error('[KnowledgeBase]', error, { source: row.source, operation });
+  }
+  return { error };
+}
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const action = searchParams.get('action');
@@ -177,12 +186,14 @@ async function handlePhoto(chatId, msg, messageId) {
 
     const analysis = await analyzeImage(imageUrl, prompt);
 
-    // Save to knowledge_base
-    await supabase.from('knowledge_base').insert({
-      source: 'image',
-      content: `[Image analysis] ${analysis}`,
-      embedding_summary: analysis.substring(0, 200),
-    });
+    await insertKnowledgeBase(
+      {
+        source: 'image',
+        content: `[Image analysis] ${analysis}`,
+        embedding_summary: analysis.substring(0, 200),
+      },
+      'handlePhoto'
+    );
 
     // Pass to AI with context
     await handleMessage(chatId, `[I sent an image. Analysis: ${analysis}]`, messageId);
@@ -218,12 +229,14 @@ async function handleDocument(chatId, msg, messageId) {
       return await sendMessage(chatId, `⚠️ I can read PDFs, Word docs, text files, and images. This file type (${mime}) isn't supported yet.`);
     }
 
-    // Save to knowledge_base
-    await supabase.from('knowledge_base').insert({
-      source: 'document',
-      content: `[Document: ${fileName}]\n${content}`,
-      embedding_summary: content.substring(0, 200),
-    });
+    await insertKnowledgeBase(
+      {
+        source: 'document',
+        content: `[Document: ${fileName}]\n${content}`,
+        embedding_summary: content.substring(0, 200),
+      },
+      'handleDocument'
+    );
 
     await handleMessage(chatId, `[I sent a document "${fileName}". Content: ${content}]`, messageId);
   } catch (err) {
@@ -278,11 +291,14 @@ async function handleMessage(chatId, text, messageId) {
       try {
         await sendMessage(chatId, `🔗 Reading ${url}...`);
         const content = await readUrl(url);
-        await supabase.from('knowledge_base').insert({
-          source: 'user_link',
-          content: `[URL: ${url}]\n${content}`,
-          embedding_summary: content.substring(0, 200),
-        });
+        await insertKnowledgeBase(
+          {
+            source: 'user_link',
+            content: `[URL: ${url}]\n${content}`,
+            embedding_summary: content.substring(0, 200),
+          },
+          `handleMessage:url:${url}`
+        );
         processedText = processedText.replace(url, `[URL content from ${url}: ${content.substring(0, 500)}...]`);
       } catch (err) {
         console.warn(`[Telegram] URL read failed for ${url}:`, err.message);
@@ -572,11 +588,17 @@ async function cmdSave(chatId, label, value) {
   if (!label || !value) {
     return await sendMessage(chatId, '💾 Usage: `/save [label] [value]`\nExample: `/save password facebook MyPass123`\nExample: `/save key groq gsk_xxxxx`');
   }
-  await supabase.from('knowledge_base').insert({
-    source: 'secure_note',
-    content: `[SECURE NOTE - ${label.toUpperCase()}]: ${value}`,
-    embedding_summary: `Secure note: ${label}`,
-  });
+  const { error: kbErr } = await insertKnowledgeBase(
+    {
+      source: 'secure_note',
+      content: `[SECURE NOTE - ${label.toUpperCase()}]: ${value}`,
+      embedding_summary: `Secure note: ${label}`,
+    },
+    'cmdSave'
+  );
+  if (kbErr) {
+    return await sendMessage(chatId, `⚠️ Could not save that note. Try again in a moment.`);
+  }
   await sendMessage(chatId, `🔐 Saved *${label}*. I'll remember it — just ask me for it anytime.`);
 }
 
@@ -587,11 +609,14 @@ async function cmdReadUrl(chatId, url) {
   try {
     await sendMessage(chatId, `🔗 Reading...`);
     const content = await readUrl(url);
-    await supabase.from('knowledge_base').insert({
-      source: 'user_link',
-      content: `[URL: ${url}]\n${content}`,
-      embedding_summary: content.substring(0, 200),
-    });
+    await insertKnowledgeBase(
+      {
+        source: 'user_link',
+        content: `[URL: ${url}]\n${content}`,
+        embedding_summary: content.substring(0, 200),
+      },
+      'cmdReadUrl'
+    );
     const systemPrompt = await import('@/lib/services/context').then(m => m.getFullPrompt(url));
     const summary = await generateResponse(systemPrompt, [
       { role: 'user', content: `Summarize this content from ${url}:\n\n${content}` }
@@ -623,12 +648,14 @@ async function cmdResearch(chatId, topic) {
       return await sendMessage(chatId, `❌ Couldn't find research sources for "${topic}"`);
     }
 
-    // Save to knowledge_base
-    await supabase.from('knowledge_base').insert({
-      source: 'research',
-      content: `[Research: ${topic}]\n${sources.substring(0, 5000)}`,
-      embedding_summary: `Research on ${topic}`,
-    });
+    await insertKnowledgeBase(
+      {
+        source: 'research',
+        content: `[Research: ${topic}]\n${sources.substring(0, 5000)}`,
+        embedding_summary: `Research on ${topic}`,
+      },
+      'cmdResearch'
+    );
 
     const systemPrompt = await import('@/lib/services/context').then(m => m.getFullPrompt(topic));
     const report = await generateResponse(systemPrompt, [
