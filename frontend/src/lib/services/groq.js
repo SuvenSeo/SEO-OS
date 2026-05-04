@@ -85,11 +85,12 @@ async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
 }
 
 // ─── Main generate function ───────────────────────────────────────────────────
-const PRIMARY_MODEL = 'llama-3.1-8b-instant'; // 500K TPD free, blazing fast
-const FALLBACK_MODEL = 'llama3-70b-8192';      // separate quota pool
+const PRIMARY_CHAT_MODEL = 'llama-3.3-70b-versatile';
+const FALLBACK_MODEL = 'llama3-70b-8192';
+const EXTRACTION_MODEL = 'llama-3.1-8b-instant';
 
 export async function generateResponse(systemPrompt, messages, options = {}) {
-  const { model = PRIMARY_MODEL, temperature = 0.7, max_tokens = 1500 } = options;
+  const { model = PRIMARY_CHAT_MODEL, temperature = 0.7, max_tokens = 1500 } = options;
 
   const fullMessages = [
     { role: 'system', content: systemPrompt },
@@ -145,6 +146,6 @@ export async function generateStructuredExtraction(prompt) {
   return generateResponse(
     'You are a precise data extraction tool. Always respond with valid JSON only, no additional text.',
     [{ role: 'user', content: prompt }],
-    { temperature: 0.2, max_tokens: 1024 }
+    { model: EXTRACTION_MODEL, temperature: 0.2, max_tokens: 1024 }
   );
 }

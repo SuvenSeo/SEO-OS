@@ -13,6 +13,13 @@ function setCache(key, val, ttlMs) {
 const TTL_5MIN  = 5  * 60 * 1000;
 const TTL_1MIN  = 1  * 60 * 1000;
 let hasWarnedMissingKnowledgeFts = false;
+const EPISODE_FETCH_LIMIT = 40;
+const BACKGROUND_EPISODE_LIMIT = 8;
+const SESSION_BREAK_MS = 90 * 60 * 1000;
+const MEANINGFUL_HINTS = [
+  'task', 'remind', 'deadline', 'due', 'exam', 'project',
+  'meeting', 'decide', 'decision', 'priority', 'plan', 'commit',
+];
 
 async function fetchRelevantKnowledge(keywords) {
   const ftsQuery = keywords.join(' | ');
@@ -60,6 +67,79 @@ async function fetchRelevantKnowledge(keywords) {
   return fallbackRows || [];
 }
 
+function compressVerboseContent(content = '') {
+  const text = content.replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+
+  if (text.startsWith('[Image analysis]')) {
+    return `[image summary] ${text.replace('[Image analysis]', '').trim().slice(0, 180)}...`;
+  }
+  if (text.startsWith('[Document:')) {
+    const title = text.slice(0, text.indexOf(']') + 1);
+    const body = text.slice(text.indexOf(']') + 1).trim();
+    return `${title} ${body.slice(0, 160)}...`;
+  }
+  if (text.includes('[URL content from')) {
+    const start = text.indexOf('[URL content from');
+    const end = text.indexOf(']', start);
+    const label = end > start ? text.slice(start, end + 1) : '[URL content]';
+    return `${label} ${text.slice(0, 130)}...`;
+  }
+  if (text.length > 550) {
+    return `${text.slice(0, 220)}...`;
+  }
+  return text;
+}
+
+function scoreEpisodeForContext(episode) {
+  const text = (episode.content || '').toLowerCase();
+  let score = episode.role === 'user' ? 2 : 1;
+  if (text.length < 24) score -= 1;
+  if (text.startsWith('[image analysis]') || text.startsWith('[document:') || text.includes('[url content from')) {
+    score -= 2;
+  }
+  for (const hint of MEANINGFUL_HINTS) {
+    if (text.includes(hint)) score += 1;
+  }
+  return score;
+}
+
+function selectConversationLines(episodes = []) {
+  if (!episodes.length) return [];
+
+  const ordered = [...episodes].sort(
+    (a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()
+  );
+
+  let sessionStart = ordered.length - 1;
+  for (let i = ordered.length - 1; i > 0; i--) {
+    const cur = new Date(ordered[i].created_at || 0).getTime();
+    const prev = new Date(ordered[i - 1].created_at || 0).getTime();
+    if (!cur || !prev || Number.isNaN(cur) || Number.isNaN(prev)) continue;
+    if ((cur - prev) > SESSION_BREAK_MS) break;
+    sessionStart = i - 1;
+  }
+
+  const background = ordered.slice(0, sessionStart);
+  const currentSession = ordered.slice(sessionStart);
+
+  const selectedBackground = background
+    .map(ep => ({ ep, score: scoreEpisodeForContext(ep) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, BACKGROUND_EPISODE_LIMIT)
+    .map(x => x.ep)
+    .sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
+
+  const lines = [];
+  for (const ep of selectedBackground) {
+    lines.push(`[${ep.role}] ${compressVerboseContent(ep.content)}`);
+  }
+  for (const ep of currentSession) {
+    lines.push(`[${ep.role}] ${(ep.content || '').replace(/\s+/g, ' ').trim()}`);
+  }
+  return lines;
+}
+
 /**
  * Build the full dynamic context for the AI brain.
  * Called before every Groq API call to inject current state.
@@ -79,8 +159,8 @@ async function buildContext(userMessage = '') {
   const cachedIdeas   = getCache('ideas');
 
   const promises = [
-    // Always fresh: episodic memory (last 10 — reduced from 30 for speed/tokens)
-    supabase.from('episodic_memory').select('role, content, created_at').order('created_at', { ascending: false }).limit(10),
+    // Always fresh: episodic memory window for smart context selection
+    supabase.from('episodic_memory').select('role, content, created_at').order('created_at', { ascending: false }).limit(EPISODE_FETCH_LIMIT),
     // Always fresh: open tasks
     supabase.from('tasks').select('id, title, description, deadline, priority, status, follow_up_count, tier').in('status', ['open', 'snoozed']).order('priority', { ascending: true }),
     // Cached 1 min: working memory
@@ -108,7 +188,7 @@ async function buildContext(userMessage = '') {
   if (!cachedIdeas    && ideas)       setCache('ideas',       ideas,        TTL_5MIN);
 
   if (episodes && episodes.length > 0) {
-    const history = episodes.reverse().map(e => `[${e.role}] ${e.content}`).join('\n');
+    const history = selectConversationLines(episodes).join('\n');
     sections.push(`RECENT CONVERSATION HISTORY:\n${history}`);
   }
 

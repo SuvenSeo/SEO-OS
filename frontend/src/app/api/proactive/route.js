@@ -11,6 +11,7 @@ const CRON_SECRET = process.env.CRON_SECRET;
 const EPISODIC_MEMORY_RETENTION = 500;
 const EPISODIC_SUMMARY_BATCH = 120;
 const EPISODIC_CORE_MEMORY_KEY = 'episodic_consolidated_summary';
+const EPISODIC_FACTS_MEMORY_KEY = 'episodic_consolidated_facts';
 const EPISODIC_CORE_MEMORY_MAX_CHARS = 12000;
 
 export async function GET(request) {
@@ -291,8 +292,9 @@ async function consolidateAndPruneEpisodicMemory() {
     }
 
     if (pruneCandidates && pruneCandidates.length > 0) {
-      const summary = await summarizeEpisodesForCoreMemory(pruneCandidates, excess);
-      await appendConsolidatedSummary(summary);
+      const consolidation = await summarizeEpisodesForCoreMemory(pruneCandidates, excess);
+      await appendConsolidatedSummary(consolidation.narrative);
+      await appendConsolidatedFacts(consolidation.facts);
       summarized = pruneCandidates.length;
     }
   }
@@ -310,7 +312,7 @@ async function summarizeEpisodesForCoreMemory(rows, totalExcess) {
     })
     .join('\n');
 
-  const systemPrompt = 'You condense personal chat logs into compact memory facts.';
+  const systemPrompt = 'You condense personal chat logs into durable personal-memory facts.';
   const userPrompt = `Summarize this conversation archive into durable memory.
 Rules:
 - Output 4-8 bullet points.
@@ -318,6 +320,15 @@ Rules:
 - Keep each bullet under 160 characters.
 - No filler or generic phrasing.
 - Include uncertainty notes only if truly ambiguous.
+Then output JSON with this exact shape:
+{
+  "decisions": ["..."],
+  "commitments": ["..."],
+  "deadlines": ["..."],
+  "project_updates": ["..."],
+  "personal_context": ["..."]
+}
+Each array can be empty. Return valid JSON only after the bullets, prefixed with "JSON:" on its own line.
 
 Rows summarized now: ${rows.length}
 Rows that will be pruned: ${totalExcess}
@@ -325,13 +336,56 @@ Rows that will be pruned: ${totalExcess}
 TRANSCRIPT:
 ${transcript}`;
 
-  const summary = await generateResponse(
+  const raw = await generateResponse(
     systemPrompt,
     [{ role: 'user', content: userPrompt }],
     { temperature: 0.2, max_tokens: 450 }
   );
 
-  return `[${new Date().toISOString()}] Consolidated ${rows.length}/${totalExcess} episodic rows\n${summary.trim()}`;
+  const normalized = (raw || '').trim();
+  const marker = '\nJSON:';
+  const markerIndex = normalized.lastIndexOf(marker);
+  const narrativeBody = markerIndex >= 0 ? normalized.slice(0, markerIndex).trim() : normalized;
+  const factsRaw = markerIndex >= 0 ? normalized.slice(markerIndex + marker.length).trim() : '';
+  const facts = parseConsolidatedFacts(factsRaw);
+
+  return {
+    narrative: `[${new Date().toISOString()}] Consolidated ${rows.length}/${totalExcess} episodic rows\n${narrativeBody}`,
+    facts,
+  };
+}
+
+function parseConsolidatedFacts(raw) {
+  if (!raw) {
+    return {
+      decisions: [],
+      commitments: [],
+      deadlines: [],
+      project_updates: [],
+      personal_context: [],
+    };
+  }
+
+  try {
+    const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    return {
+      decisions: Array.isArray(parsed.decisions) ? parsed.decisions : [],
+      commitments: Array.isArray(parsed.commitments) ? parsed.commitments : [],
+      deadlines: Array.isArray(parsed.deadlines) ? parsed.deadlines : [],
+      project_updates: Array.isArray(parsed.project_updates) ? parsed.project_updates : [],
+      personal_context: Array.isArray(parsed.personal_context) ? parsed.personal_context : [],
+    };
+  } catch (error) {
+    console.warn('[Proactive] failed to parse consolidated facts JSON:', error.message);
+    return {
+      decisions: [],
+      commitments: [],
+      deadlines: [],
+      project_updates: [],
+      personal_context: [],
+    };
+  }
 }
 
 async function appendConsolidatedSummary(summary) {
@@ -363,6 +417,50 @@ async function appendConsolidatedSummary(summary) {
 
   if (upsertError) {
     console.error('[Proactive] upsert episodic core memory failed:', upsertError.message);
+    throw upsertError;
+  }
+}
+
+async function appendConsolidatedFacts(facts) {
+  const lines = [
+    ...facts.decisions.map(x => `decision: ${x}`),
+    ...facts.commitments.map(x => `commitment: ${x}`),
+    ...facts.deadlines.map(x => `deadline: ${x}`),
+    ...facts.project_updates.map(x => `project: ${x}`),
+    ...facts.personal_context.map(x => `context: ${x}`),
+  ].map(x => x.replace(/\s+/g, ' ').trim()).filter(Boolean);
+
+  if (lines.length === 0) return;
+
+  const { data: existing, error: readError } = await supabase
+    .from('core_memory')
+    .select('value')
+    .eq('key', EPISODIC_FACTS_MEMORY_KEY)
+    .maybeSingle();
+  if (readError) {
+    console.error('[Proactive] read episodic facts memory failed:', readError.message);
+    throw readError;
+  }
+
+  const existingLines = (existing?.value || '')
+    .split('\n')
+    .map(x => x.trim())
+    .filter(Boolean);
+  const mergedLines = [...new Set([...existingLines, ...lines])].slice(-160);
+  const mergedValue = mergedLines.join('\n');
+
+  const { error: upsertError } = await supabase
+    .from('core_memory')
+    .upsert(
+      {
+        key: EPISODIC_FACTS_MEMORY_KEY,
+        value: mergedValue,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'key' }
+    );
+  if (upsertError) {
+    console.error('[Proactive] upsert episodic facts memory failed:', upsertError.message);
     throw upsertError;
   }
 }
