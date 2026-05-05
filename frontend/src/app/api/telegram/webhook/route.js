@@ -199,18 +199,134 @@ async function markTelegramMessageProcessed(messageId) {
   }
 }
 
-function sanitizeAssistantReply(response, recentMessages = []) {
-  const fallback = "Got it. Let's reset and keep this useful. Tell me exactly what you want me to do right now.";
-  const text = (response || '').trim();
-  if (!text) return fallback;
+function normalizeForCompare(text = '') {
+  return (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
 
-  if (/(i(?:'| a)m not going to engage|i(?:'| a)ve had enough|this is not a conversation|end of conversation|not acceptable)/i.test(text)) {
+function isGreetingOnlyMessage(text = '') {
+  const normalized = (text || '').trim().toLowerCase();
+  if (!normalized || normalized.length > 60) return false;
+  if (/[/?]/.test(normalized) || /\b(remind|task|deadline|clear|delete|remove|save|research|read)\b/i.test(normalized)) {
+    return false;
+  }
+  return /^(hi|hii+|hello+|helloo+|hey+|heyy+|yo+|sup+|hola+|good (morning|afternoon|evening)|what'?s up|whats up|how are you)\W*$/.test(normalized);
+}
+
+function buildWarmGreetingReply() {
+  return "Hey Suven 👋 I'm here. Want to just chat, set a reminder, or get a quick summary of your day?";
+}
+
+function extractReminderMessage(text = '') {
+  const reminderMatch = text.match(/remind me(?:\s+(?:to|about))?\s+(.+)/i)
+    || text.match(/set (?:a )?reminder(?:\s+(?:to|for))?\s+(.+)/i);
+  let message = reminderMatch?.[1] || 'Follow up';
+  message = message
+    .replace(/\b(today|tomorrow)\b/ig, ' ')
+    .replace(/\b(at|from)\s*\d{1,2}(?::\d{2})?\s*(am|pm)\b/ig, ' ')
+    .replace(/\bevery (half an hour|30 minutes).*/ig, ' ')
+    .replace(/[.,!?]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return message || 'Follow up';
+}
+
+function buildColomboTriggerIso(dayOffset, hour24, minute) {
+  const colomboNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Colombo' }));
+  colomboNow.setSeconds(0, 0);
+  colomboNow.setDate(colomboNow.getDate() + dayOffset);
+  colomboNow.setHours(hour24, minute, 0, 0);
+  // Asia/Colombo is UTC+05:30 with no DST.
+  const utcMs = colomboNow.getTime() - (5.5 * 60 * 60 * 1000);
+  return new Date(utcMs).toISOString();
+}
+
+function parseNaturalReminderIntent(text = '') {
+  if (!/\b(remind me|set (a )?reminder|reminder)\b/i.test(text)) return null;
+
+  const timeMatch = text.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
+  const mentionsTomorrow = /\btomorrow\b/i.test(text);
+  const mentionsToday = /\btoday\b/i.test(text);
+  const reminderMessage = extractReminderMessage(text);
+
+  if (!timeMatch) {
+    return {
+      intent: 'needs_time',
+      dayLabel: mentionsTomorrow ? 'tomorrow' : (mentionsToday ? 'today' : 'tomorrow'),
+      reminderMessage,
+    };
+  }
+
+  let hour = Number(timeMatch[1]);
+  const minute = Number(timeMatch[2] || 0);
+  const meridiem = timeMatch[3].toLowerCase();
+  if (hour < 1 || hour > 12 || minute < 0 || minute > 59) return null;
+  if (meridiem === 'pm' && hour !== 12) hour += 12;
+  if (meridiem === 'am' && hour === 12) hour = 0;
+
+  let dayOffset = mentionsTomorrow ? 1 : 0;
+  if (!mentionsTomorrow && !mentionsToday) {
+    const nowColombo = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Colombo' }));
+    const currentMinutes = nowColombo.getHours() * 60 + nowColombo.getMinutes();
+    const targetMinutes = hour * 60 + minute;
+    if (targetMinutes <= currentMinutes) dayOffset = 1;
+  }
+
+  return {
+    intent: 'set',
+    reminderMessage,
+    triggerAt: buildColomboTriggerIso(dayOffset, hour, minute),
+  };
+}
+
+function normalizeReminderForCompare(message = '') {
+  return (message || '')
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function hasSimilarPendingReminder(message, triggerAt) {
+  const windowStart = new Date(new Date(triggerAt).getTime() - (60 * 60 * 1000)).toISOString();
+  const windowEnd = new Date(new Date(triggerAt).getTime() + (60 * 60 * 1000)).toISOString();
+  const { data, error } = await supabase
+    .from('reminders')
+    .select('message, trigger_at')
+    .eq('fired', false)
+    .gte('trigger_at', windowStart)
+    .lte('trigger_at', windowEnd)
+    .limit(30);
+  if (error) {
+    console.error('[Telegram] Reminder dedupe check failed:', error.message);
+    return false;
+  }
+
+  const normalizedMessage = normalizeReminderForCompare(message);
+  const targetMs = new Date(triggerAt).getTime();
+  return (data || []).some((r) => {
+    const sameMessage = normalizeReminderForCompare(r.message) === normalizedMessage;
+    const ms = new Date(r.trigger_at).getTime();
+    return sameMessage && Math.abs(ms - targetMs) <= (15 * 60 * 1000);
+  });
+}
+
+function sanitizeAssistantReply(response, recentMessages = [], userText = '', lastAssistantText = '') {
+  const fallback = "I'm here with you. Tell me what you want to do next, and I'll handle it.";
+  const text = (response || '').trim();
+  if (!text) return isGreetingOnlyMessage(userText) ? buildWarmGreetingReply() : fallback;
+
+  const refusalOrScolding = /(i(?:'| a)m not going to engage|i(?:'| a)ve had enough|this is not a conversation|end of conversation|not acceptable)/i.test(text);
+  if (refusalOrScolding) {
+    if (isGreetingOnlyMessage(userText)) return buildWarmGreetingReply();
+    if (/\b(remind me|set (a )?reminder|reminder)\b/i.test(userText)) {
+      return "Got it. I can set that reminder. If you didn't include a time, tell me the exact time and I'll schedule it.";
+    }
     return fallback;
   }
 
   const hasHistory = (recentMessages || []).length >= 4;
   if (hasHistory && /(our conversation just started|this is the beginning of our conversation|i don't know much about you|i'm a blank slate)/i.test(text)) {
-    return 'I do have your ongoing context. If you want, I can show your current tasks/reminders or clear/reset them.';
+    return "I do have your ongoing context. Want me to show reminders, tasks, or just continue chatting?";
   }
 
   const lines = text
@@ -226,7 +342,13 @@ function sanitizeAssistantReply(response, recentMessages = []) {
     uniqueLines.push(line);
   }
 
-  return uniqueLines.join('\n').trim() || fallback;
+  const cleaned = uniqueLines.join('\n').trim() || fallback;
+  if (normalizeForCompare(cleaned) === normalizeForCompare(lastAssistantText || '')) {
+    return isGreetingOnlyMessage(userText)
+      ? buildWarmGreetingReply()
+      : "Got you. I'm here and ready—tell me the next thing you want me to handle.";
+  }
+  return cleaned;
 }
 
 export async function GET(request) {
@@ -661,15 +783,13 @@ async function handleMessage(chatId, text, messageId) {
     }
   }
 
-  // Run DB writes + context fetch in parallel
-  const [, , systemPrompt, recentResult] = await Promise.all([
-    // Save user message
+  // Save user message + update morning brief signal first.
+  await Promise.all([
     supabase.from('episodic_memory').insert({
       role: 'user',
       content: processedText,
       telegram_message_id: messageId,
     }),
-    // Track morning brief reply
     (async () => {
       const istHour = parseInt(new Date().toLocaleString('en-US', { timeZone: 'Asia/Colombo', hour: 'numeric', hour12: false }), 10);
       if (istHour >= 8 && istHour < 11) {
@@ -679,15 +799,75 @@ async function handleMessage(chatId, text, messageId) {
         );
       }
     })(),
-    // Build full context + system prompt
-    getFullPrompt(processedText),
-    // Fetch recent conversation history
-    supabase.from('episodic_memory').select('role, content').order('created_at', { ascending: false }).limit(20),
   ]);
 
-  const messages = (recentResult.data || [])
+  const { data: recentRows } = await supabase
+    .from('episodic_memory')
+    .select('role, content')
+    .order('created_at', { ascending: false })
+    .limit(20);
+
+  const messages = (recentRows || [])
     .reverse()
     .map(m => ({ role: m.role, content: m.content }));
+  const lastAssistantText = [...messages].reverse().find((m) => m.role === 'assistant')?.content || '';
+
+  // Quick human-first greeting flow
+  if (isGreetingOnlyMessage(processedText)) {
+    const greetingResponse = sanitizeAssistantReply(buildWarmGreetingReply(), messages, processedText, lastAssistantText);
+    await sendMessage(chatId, greetingResponse);
+    await Promise.all([
+      supabase.from('episodic_memory').insert({ role: 'assistant', content: greetingResponse }),
+      trackEntitiesInBackground(processedText).catch(err => console.error('[Telegram] Entity tracking error:', err.message)),
+      trackMoodInBackground(processedText).catch(err => console.error('[Telegram] Mood tracking error:', err.message)),
+    ]);
+    return;
+  }
+
+  // Quick reminder intent flow
+  const reminderIntent = parseNaturalReminderIntent(processedText);
+  if (reminderIntent?.intent === 'needs_time') {
+    const askTime = `Got it — what time ${reminderIntent.dayLabel} should I remind you to ${reminderIntent.reminderMessage}?`;
+    await sendMessage(chatId, askTime);
+    await Promise.all([
+      supabase.from('episodic_memory').insert({ role: 'assistant', content: askTime }),
+      trackEntitiesInBackground(processedText).catch(err => console.error('[Telegram] Entity tracking error:', err.message)),
+      trackMoodInBackground(processedText).catch(err => console.error('[Telegram] Mood tracking error:', err.message)),
+    ]);
+    return;
+  }
+
+  if (reminderIntent?.intent === 'set') {
+    const exists = await hasSimilarPendingReminder(reminderIntent.reminderMessage, reminderIntent.triggerAt);
+    let reminderResponse;
+    if (exists) {
+      reminderResponse = `Already set ✅ I'll remind you on ${new Date(reminderIntent.triggerAt).toLocaleString('en-US', { timeZone: 'Asia/Colombo' })}.`;
+    } else {
+      const { error } = await supabase.from('reminders').insert({
+        message: reminderIntent.reminderMessage,
+        trigger_at: reminderIntent.triggerAt,
+        tier: 2,
+        tier_reason: 'Direct natural-language reminder request',
+        fired: false,
+      });
+      if (error) {
+        console.error('[Telegram] Reminder insert failed:', error.message);
+        reminderResponse = "I couldn't save that reminder right now. Try once more and I'll set it.";
+      } else {
+        reminderResponse = `Done ✅ I'll remind you on ${new Date(reminderIntent.triggerAt).toLocaleString('en-US', { timeZone: 'Asia/Colombo' })}.`;
+      }
+    }
+
+    await sendMessage(chatId, reminderResponse);
+    await Promise.all([
+      supabase.from('episodic_memory').insert({ role: 'assistant', content: reminderResponse }),
+      trackEntitiesInBackground(processedText).catch(err => console.error('[Telegram] Entity tracking error:', err.message)),
+      trackMoodInBackground(processedText).catch(err => console.error('[Telegram] Mood tracking error:', err.message)),
+    ]);
+    return;
+  }
+
+  const systemPrompt = await getFullPrompt(processedText);
 
   // Generate AI response
   let aiResponse;
@@ -699,7 +879,7 @@ async function handleMessage(chatId, text, messageId) {
     return;
   }
 
-  const safeResponse = sanitizeAssistantReply(aiResponse, messages);
+  const safeResponse = sanitizeAssistantReply(aiResponse, messages, processedText, lastAssistantText);
 
   // Send reply FIRST — user sees it immediately
   await sendMessage(chatId, safeResponse);
@@ -728,7 +908,7 @@ async function handleCommand(chatId, text, messageId) {
 
   switch (cmd) {
     case '/start':
-      await sendMessage(chatId, '🔴 *SEOS Online*\n\nChief of Staff mode active. How can I help?');
+      await sendMessage(chatId, '🔴 *SEOS Online*\n\nHey Suven 👋 I’m here. We can chat naturally, set reminders, track tasks, research links, and keep your memory updated.');
       break;
     case '/tasks':
       await cmdTasks(chatId);

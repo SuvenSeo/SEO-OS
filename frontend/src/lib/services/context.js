@@ -29,11 +29,14 @@ const CONTEXT_NOISE_PATTERNS = [
   /^end of conversation/i,
   /^🔴 .*test message/i,
 ];
+const GREETING_ONLY_PATTERN = /^(hi|hii+|hello+|helloo+|hey+|heyy+|yo+|sup+|hola+|good (morning|afternoon|evening)|what'?s up|whats up|how are you)\W*$/i;
 const RESPONSE_GUARDRAILS = `NON-NEGOTIABLE RESPONSE RULES:
 - Follow explicit user instructions first (especially reset/delete/clear requests).
 - Never invent or retain reminders/tasks the user asked to delete.
 - Never claim "we just started" or "I don't know you" when context contains prior history.
 - Do not shame, scold, or refuse normal conversation. Stay calm, direct, and helpful.
+- If the user sends a simple greeting or small talk, reply like a warm human conversation (do not dump task/reminder state unless asked).
+- Keep the tone natural and collaborative; avoid robotic scripts and repeated fallback wording.
 - Before finalizing your answer, self-check for contradiction with the latest user message and fix it.
 - If unsure, ask one clarifying question instead of guessing.`;
 const MEANINGFUL_HINTS = [
@@ -169,6 +172,15 @@ function isContextNoiseEpisode(episode) {
   return CONTEXT_NOISE_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+function isGreetingOnlyMessage(message = '') {
+  const text = (message || '').trim();
+  if (!text || text.length > 60) return false;
+  if (/[/?]/.test(text) || /\b(remind|task|deadline|clear|delete|remove|save|research|read)\b/i.test(text)) {
+    return false;
+  }
+  return GREETING_ONLY_PATTERN.test(text);
+}
+
 function selectConversationLines(episodes = []) {
   if (!episodes.length) return [];
 
@@ -216,6 +228,7 @@ function selectConversationLines(episodes = []) {
 async function buildContext(userMessage = '') {
   const sections = [];
   const now = new Date();
+  const greetingOnly = isGreetingOnlyMessage(userMessage);
 
   // 0. Current Date/Time
   sections.push(`CURRENT DATE/TIME: ${now.toISOString()} (Sri Lanka: ${now.toLocaleString('en-US', { timeZone: 'Asia/Colombo' })})`);
@@ -259,7 +272,7 @@ async function buildContext(userMessage = '') {
     sections.push(`RECENT CONVERSATION HISTORY:\n${history}`);
   }
 
-  if (tasks && tasks.length > 0) {
+  if (!greetingOnly && tasks && tasks.length > 0) {
     const taskList = tasks.map(t => {
       let line = `  [T${t.tier}] P${t.priority}: ${t.title}`;
       if (t.deadline) line += ` [due: ${new Date(t.deadline).toLocaleDateString('en-US', { timeZone: 'Asia/Colombo' })}]`;
@@ -278,16 +291,16 @@ async function buildContext(userMessage = '') {
     sections.push(`WORKING MEMORY (short-term):\n${workingMemory.map(m => `  ${m.key}: ${m.value}`).join('\n')}`);
   }
 
-  if (patterns && patterns.length > 0) {
+  if (!greetingOnly && patterns && patterns.length > 0) {
     sections.push(`OBSERVED PATTERNS:\n${patterns.map(p => `  [${p.confidence}] ${p.observation}`).join('\n')}`);
   }
 
-  if (ideas && ideas.length > 0) {
+  if (!greetingOnly && ideas && ideas.length > 0) {
     sections.push(`RECENT RAW IDEAS:\n${ideas.map(i => `  - ${i.content}`).join('\n')}`);
   }
 
   // RELEVANT KNOWLEDGE — Full-text search on knowledge_base using user's message
-  if (userMessage && userMessage.length > 3) {
+  if (!greetingOnly && userMessage && userMessage.length > 3) {
     const stopWords = new Set(['this', 'that', 'with', 'from', 'have', 'will', 'been', 'they', 'what', 'just', 'your', 'about']);
     const keywords = userMessage
       .toLowerCase()
