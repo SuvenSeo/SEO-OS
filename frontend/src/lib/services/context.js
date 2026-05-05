@@ -17,6 +17,25 @@ let hasWarnedMissingKnowledgeFts = false;
 const EPISODE_FETCH_LIMIT = 40;
 const BACKGROUND_EPISODE_LIMIT = 8;
 const SESSION_BREAK_MS = 90 * 60 * 1000;
+const CONTEXT_NOISE_PATTERNS = [
+  /^_?📋 \d+ task\(s\) logged/i,
+  /^_?⏰ \d+ reminder\(s\) set/i,
+  /^_?💡 \d+ idea\(s\) captured/i,
+  /^_?🧠 \d+ memory update\(s\)/i,
+  /^unknown command:/i,
+  /^❌ usage:/i,
+  /^⚠️ all ai providers are currently down/i,
+  /i(?:'| a)m not going to engage in this conversation anymore/i,
+  /^end of conversation/i,
+  /^🔴 .*test message/i,
+];
+const RESPONSE_GUARDRAILS = `NON-NEGOTIABLE RESPONSE RULES:
+- Follow explicit user instructions first (especially reset/delete/clear requests).
+- Never invent or retain reminders/tasks the user asked to delete.
+- Never claim "we just started" or "I don't know you" when context contains prior history.
+- Do not shame, scold, or refuse normal conversation. Stay calm, direct, and helpful.
+- Before finalizing your answer, self-check for contradiction with the latest user message and fix it.
+- If unsure, ask one clarifying question instead of guessing.`;
 const MEANINGFUL_HINTS = [
   'task', 'remind', 'deadline', 'due', 'exam', 'project',
   'meeting', 'decide', 'decision', 'priority', 'plan', 'commit',
@@ -143,6 +162,13 @@ function scoreEpisodeForContext(episode) {
   return score;
 }
 
+function isContextNoiseEpisode(episode) {
+  if (!episode || !episode.content) return true;
+  const text = (episode.content || '').replace(/\s+/g, ' ').trim();
+  if (!text) return true;
+  return CONTEXT_NOISE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 function selectConversationLines(episodes = []) {
   if (!episodes.length) return [];
 
@@ -171,9 +197,11 @@ function selectConversationLines(episodes = []) {
 
   const lines = [];
   for (const ep of selectedBackground) {
+    if (isContextNoiseEpisode(ep)) continue;
     lines.push(`[${ep.role}] ${compressVerboseContent(ep.content)}`);
   }
   for (const ep of currentSession) {
+    if (isContextNoiseEpisode(ep)) continue;
     lines.push(`[${ep.role}] ${(ep.content || '').replace(/\s+/g, ' ').trim()}`);
   }
   return lines;
@@ -316,5 +344,5 @@ export async function getFullPrompt(userMessage = '') {
     buildContext(userMessage),
   ]);
 
-  return `${systemPrompt}\n\n===== CURRENT CONTEXT =====\n\n${context}`;
+  return `${systemPrompt}\n\n===== RESPONSE RULES =====\n\n${RESPONSE_GUARDRAILS}\n\n===== CURRENT CONTEXT =====\n\n${context}`;
 }

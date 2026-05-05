@@ -1,6 +1,80 @@
 import supabase from '../config/supabase.js';
 import { generateStructuredExtraction } from './groq.js';
 
+const ACTIONABLE_PATTERNS = [
+  /\b(remind me|set (a )?reminder|reminder)\b/i,
+  /\b(i need to|i have to|i must|todo|to-do|task|deadline|due)\b/i,
+  /\b(by \d{1,2}(:\d{2})?\s?(am|pm)|tomorrow|today|next week|this week)\b/i,
+  /\b(idea|brainstorm|note this|remember this|save this)\b/i,
+  /\b(clear|delete|remove|reset|start fresh|wipe)\b/i,
+];
+
+function isActionableUserMessage(message = '') {
+  const text = (message || '').trim();
+  if (!text || text.startsWith('/')) return false;
+  return ACTIONABLE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function parseCleanupIntent(message = '') {
+  const text = (message || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!text) return { clearTasks: false, clearReminders: false, clearSingleReminder: false };
+
+  const clearAll = /(reset (everything|all)|clear everything|wipe everything|start fresh)/i.test(text);
+  const clearTasks = clearAll || /(clear|delete|remove).*(all )?(tasks|task list)/i.test(text);
+  const clearRemindersAll = clearAll || /(clear|delete|remove).*(all )?(reminders|reminder list)/i.test(text);
+  const clearSingleReminder = !clearAll && !clearRemindersAll && /(remove|delete|clear|cancel).*(that|this) reminder/i.test(text);
+
+  return {
+    clearTasks,
+    clearReminders: clearRemindersAll || clearSingleReminder,
+    clearSingleReminder,
+  };
+}
+
+async function applyCleanupIntent(intent) {
+  const summary = { cleared_tasks: 0, cleared_reminders: 0 };
+
+  if (intent.clearTasks) {
+    const { count } = await supabase
+      .from('tasks')
+      .delete({ count: 'exact' })
+      .in('status', ['open', 'snoozed']);
+    summary.cleared_tasks = count || 0;
+  }
+
+  if (intent.clearReminders) {
+    if (intent.clearSingleReminder) {
+      const { data: nextReminder } = await supabase
+        .from('reminders')
+        .select('id')
+        .eq('fired', false)
+        .order('trigger_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      if (nextReminder?.id) {
+        const { count } = await supabase
+          .from('reminders')
+          .delete({ count: 'exact' })
+          .eq('id', nextReminder.id);
+        summary.cleared_reminders = count || 0;
+      }
+    } else {
+      const { count } = await supabase
+        .from('reminders')
+        .delete({ count: 'exact' })
+        .eq('fired', false);
+      summary.cleared_reminders = count || 0;
+    }
+  }
+
+  return summary;
+}
+
+function normalizeReminderMessage(message = '') {
+  return (message || '').toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 /**
  * Post-process an AI conversation exchange.
  * Detects tasks, reminders, ideas, and memory updates.
@@ -11,6 +85,29 @@ import { generateStructuredExtraction } from './groq.js';
  * @returns {Promise<object>} Summary of what was detected and created
  */
 export async function processExchange(userMessage, aiResponse) {
+  const cleanupIntent = parseCleanupIntent(userMessage);
+  const shouldExtract = isActionableUserMessage(userMessage);
+
+  const summary = {
+    tasks: 0,
+    reminders: 0,
+    ideas: 0,
+    memory_updates: 0,
+    snoozed: 0,
+    cleared_tasks: 0,
+    cleared_reminders: 0,
+  };
+
+  if (cleanupIntent.clearTasks || cleanupIntent.clearReminders) {
+    const cleanupSummary = await applyCleanupIntent(cleanupIntent);
+    summary.cleared_tasks = cleanupSummary.cleared_tasks;
+    summary.cleared_reminders = cleanupSummary.cleared_reminders;
+  }
+
+  if (!shouldExtract) {
+    return summary;
+  }
+
   const extractionPrompt = `Analyze this conversation exchange and extract any actionable items.
 
 USER MESSAGE: "${userMessage}"
@@ -65,6 +162,8 @@ Urgency Tier Classification (USE YOUR JUDGMENT):
 - Tier 4 (Soft): No real deadline. Exploration, "someday", "maybe", "could be cool". (Classify these as ideas).
 
 Rules:
+- Extract items ONLY from USER MESSAGE. AI RESPONSE is context, not a source of new commitments.
+- Never create tasks/reminders from assistant coaching, motivational language, or follow-up prompts.
 - Do NOT use keyword matching. Use the meaning and context of the conversation to decide the tier.
 - Provide a concise "tier_reason" for every task and reminder explaining your classification.
 - Only extract items that were explicitly mentioned or clearly implied.
@@ -87,10 +186,8 @@ Return ONLY valid JSON.`;
       extracted = JSON.parse(cleaned);
     } catch (parseError) {
       console.warn('[PostProcessor] Failed to parse extraction:', parseError.message);
-      return { tasks: 0, reminders: 0, ideas: 0, memory_updates: 0, snoozed: 0 };
+      return summary;
     }
-
-    const summary = { tasks: 0, reminders: 0, ideas: 0, memory_updates: 0, snoozed: 0 };
 
     // Insert detected tasks — skip duplicates (same title already open)
     if (extracted.tasks && extracted.tasks.length > 0) {
@@ -104,6 +201,7 @@ Return ONLY valid JSON.`;
       );
 
       for (const task of extracted.tasks) {
+        if (!task?.title?.trim()) continue;
         if (existingTitles.has(task.title.toLowerCase().trim())) continue;
         const { error } = await supabase.from('tasks').insert({
           title: task.title,
@@ -121,8 +219,32 @@ Return ONLY valid JSON.`;
 
     // Insert detected reminders
     if (extracted.reminders && extracted.reminders.length > 0) {
+      const { data: existingReminders } = await supabase
+        .from('reminders')
+        .select('message, trigger_at')
+        .eq('fired', false)
+        .gte('trigger_at', new Date(Date.now() - (24 * 60 * 60 * 1000)).toISOString());
+
+      const reminderFingerprints = new Set(
+        (existingReminders || []).map((r) => {
+          const ts = new Date(r.trigger_at).getTime();
+          return `${normalizeReminderMessage(r.message)}|${Number.isNaN(ts) ? 0 : ts}`;
+        })
+      );
+
       for (const reminder of extracted.reminders) {
         if (!reminder.trigger_at) continue;
+        const triggerAtMs = new Date(reminder.trigger_at).getTime();
+        if (Number.isNaN(triggerAtMs)) continue;
+        const normalizedMessage = normalizeReminderMessage(reminder.message);
+        const exactKey = `${normalizedMessage}|${triggerAtMs}`;
+        const nearDuplicate = [...reminderFingerprints].some((fp) => {
+          const [msg, tsRaw] = fp.split('|');
+          const ts = Number(tsRaw);
+          return msg === normalizedMessage && Math.abs(ts - triggerAtMs) <= (15 * 60 * 1000);
+        });
+        if (nearDuplicate) continue;
+
         const { error } = await supabase.from('reminders').insert({
           message: reminder.message,
           trigger_at: reminder.trigger_at,
@@ -130,7 +252,10 @@ Return ONLY valid JSON.`;
           tier_reason: reminder.tier_reason || null,
           fired: false,
         });
-        if (!error) summary.reminders++;
+        if (!error) {
+          reminderFingerprints.add(exactKey);
+          summary.reminders++;
+        }
       }
     }
 
@@ -148,6 +273,7 @@ Return ONLY valid JSON.`;
     // Process memory updates
     if (extracted.memory_updates && extracted.memory_updates.length > 0) {
       for (const mem of extracted.memory_updates) {
+        if (!mem?.key || !mem?.value) continue;
         if (mem.type === 'core') {
           const { error } = await supabase
             .from('core_memory')
@@ -158,6 +284,7 @@ Return ONLY valid JSON.`;
           if (!error) summary.memory_updates++;
         } else if (mem.type === 'working') {
           const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+          await supabase.from('working_memory').delete().eq('key', mem.key);
           const { error } = await supabase.from('working_memory').insert({
             key: mem.key,
             value: mem.value,
@@ -186,7 +313,7 @@ Return ONLY valid JSON.`;
     return summary;
   } catch (error) {
     console.error('[PostProcessor] Error:', error.message);
-    return { tasks: 0, reminders: 0, ideas: 0, memory_updates: 0, snoozed: 0 };
+    return summary;
   }
 }
 
@@ -195,6 +322,8 @@ Return ONLY valid JSON.`;
  */
 export function formatSummary(summary) {
   const parts = [];
+  if (summary.cleared_tasks > 0) parts.push(`🗑️ ${summary.cleared_tasks} task(s) cleared`);
+  if (summary.cleared_reminders > 0) parts.push(`🧹 ${summary.cleared_reminders} reminder(s) removed`);
   if (summary.tasks > 0) parts.push(`📋 ${summary.tasks} task(s) logged`);
   if (summary.reminders > 0) parts.push(`⏰ ${summary.reminders} reminder(s) set`);
   if (summary.snoozed > 0) parts.push(`😴 ${summary.snoozed} snoozed`);

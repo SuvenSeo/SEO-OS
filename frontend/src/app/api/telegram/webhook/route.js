@@ -11,6 +11,7 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const ENTITY_PEOPLE_KEY = 'entity_people';
 const ENTITY_PROJECTS_KEY = 'entity_projects';
 const MOOD_TRACKING_COOLDOWN_KEY = 'mood_tracking_last_at';
+const MESSAGE_DEDUPE_TTL_HOURS = 24;
 
 /** Inserts a knowledge_base row; logs { error } with source + operation. Returns { error } for callers that need to branch. */
 async function insertKnowledgeBase(row, operation) {
@@ -168,6 +169,66 @@ async function trackMoodInBackground(text) {
     );
 }
 
+async function hasProcessedTelegramMessage(messageId) {
+  if (!messageId) return false;
+  const key = `telegram_processed_${messageId}`;
+  const { data, error } = await supabase
+    .from('working_memory')
+    .select('id')
+    .eq('key', key)
+    .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
+    .limit(1);
+  if (error) {
+    console.error('[Telegram] Dedupe check failed:', error.message);
+    return false;
+  }
+  return (data || []).length > 0;
+}
+
+async function markTelegramMessageProcessed(messageId) {
+  if (!messageId) return;
+  const key = `telegram_processed_${messageId}`;
+  const expiresAt = new Date(Date.now() + MESSAGE_DEDUPE_TTL_HOURS * 60 * 60 * 1000).toISOString();
+  const { error } = await supabase.from('working_memory').insert({
+    key,
+    value: '1',
+    expires_at: expiresAt,
+  });
+  if (error) {
+    console.error('[Telegram] Dedupe mark failed:', error.message);
+  }
+}
+
+function sanitizeAssistantReply(response, recentMessages = []) {
+  const fallback = "Got it. Let's reset and keep this useful. Tell me exactly what you want me to do right now.";
+  const text = (response || '').trim();
+  if (!text) return fallback;
+
+  if (/(i(?:'| a)m not going to engage|i(?:'| a)ve had enough|this is not a conversation|end of conversation|not acceptable)/i.test(text)) {
+    return fallback;
+  }
+
+  const hasHistory = (recentMessages || []).length >= 4;
+  if (hasHistory && /(our conversation just started|this is the beginning of our conversation|i don't know much about you|i'm a blank slate)/i.test(text)) {
+    return 'I do have your ongoing context. If you want, I can show your current tasks/reminders or clear/reset them.';
+  }
+
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const uniqueLines = [];
+  const seen = new Set();
+  for (const line of lines) {
+    const normalized = line.toLowerCase();
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    uniqueLines.push(line);
+  }
+
+  return uniqueLines.join('\n').trim() || fallback;
+}
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const action = searchParams.get('action');
@@ -298,6 +359,12 @@ async function handleUpdate(update) {
     console.log(`[Telegram] Unauthorized chat: ${chatId}`);
     return;
   }
+
+  if (await hasProcessedTelegramMessage(messageId)) {
+    console.log(`[Telegram] Duplicate message ignored: ${messageId}`);
+    return;
+  }
+  await markTelegramMessageProcessed(messageId);
 
   // Voice message
   if (msg.voice) {
@@ -632,8 +699,10 @@ async function handleMessage(chatId, text, messageId) {
     return;
   }
 
+  const safeResponse = sanitizeAssistantReply(aiResponse, messages);
+
   // Send reply FIRST — user sees it immediately
-  await sendMessage(chatId, aiResponse);
+  await sendMessage(chatId, safeResponse);
   console.log('[Telegram] AI response sent');
 
   // Skip post-processing for short/casual messages (saves an API call)
@@ -641,8 +710,8 @@ async function handleMessage(chatId, text, messageId) {
 
   // Save AI response + post-process in background (user already has reply)
   await Promise.all([
-    supabase.from('episodic_memory').insert({ role: 'assistant', content: aiResponse }),
-    isShort ? Promise.resolve() : processExchange(processedText, aiResponse).then(summary => {
+    supabase.from('episodic_memory').insert({ role: 'assistant', content: safeResponse }),
+    isShort ? Promise.resolve() : processExchange(processedText, safeResponse).then(summary => {
       const summaryText = formatSummary(summary);
       if (summaryText.trim()) {
         return sendMessage(chatId, summaryText);
@@ -676,6 +745,9 @@ async function handleCommand(chatId, text, messageId) {
     case '/brief':
       await cmdBrief(chatId);
       break;
+    case '/review':
+      await cmdBrief(chatId);
+      break;
     case '/done': {
       const arg = text.split(' ')[1];
       await cmdDone(chatId, arg);
@@ -704,7 +776,7 @@ async function handleCommand(chatId, text, messageId) {
       break;
     }
     case '/help':
-      await sendMessage(chatId, '📋 *Commands*\n/tasks — open tasks\n/reminders — upcoming reminders\n/ideas — raw ideas\n/memory — core memory\n/brief — morning brief\n/done [id] — mark task done\n/done all — mark ALL tasks done\n/clear tasks — delete all tasks\n/save [label] [value] — store secure note/password\n/read [url] — read and save a link\n/research [topic] — deep dive a topic\n/help — this list');
+      await sendMessage(chatId, '📋 *Commands*\n/tasks — open tasks\n/reminders — upcoming reminders\n/ideas — raw ideas\n/memory — core memory\n/brief — morning brief\n/review — quick daily review\n/done [id] — mark task done\n/done all — mark ALL tasks done\n/clear tasks — delete open tasks\n/clear reminders — delete upcoming reminders\n/clear all — clear tasks + reminders\n/save [label] [value] — store secure note/password\n/read [url] — read and save a link\n/research [topic] — deep dive a topic\n/help — this list');
       break;
     default:
       await sendMessage(chatId, `Unknown command: \`${cmd}\`\nType /help for available commands.`);
@@ -871,7 +943,27 @@ async function cmdClear(chatId, arg) {
       .in('status', ['open', 'snoozed']);
     return await sendMessage(chatId, `🗑️ Cleared ${count ?? 'all'} open tasks.`);
   }
-  await sendMessage(chatId, 'Usage: /clear tasks');
+
+  if (arg === 'reminders') {
+    const { count } = await supabase
+      .from('reminders')
+      .delete({ count: 'exact' })
+      .eq('fired', false);
+    return await sendMessage(chatId, `🧹 Cleared ${count ?? 'all'} upcoming reminders.`);
+  }
+
+  if (arg === 'all') {
+    const [tasksRes, remindersRes] = await Promise.all([
+      supabase.from('tasks').delete({ count: 'exact' }).in('status', ['open', 'snoozed']),
+      supabase.from('reminders').delete({ count: 'exact' }).eq('fired', false),
+      supabase.from('working_memory').delete().in('key', ['morning_brief_nudge_at', 'morning_brief_replied']),
+    ]);
+    const taskCount = tasksRes.count ?? 0;
+    const reminderCount = remindersRes.count ?? 0;
+    return await sendMessage(chatId, `🧼 Reset done. Cleared ${taskCount} task(s) and ${reminderCount} reminder(s).`);
+  }
+
+  await sendMessage(chatId, 'Usage: /clear tasks | /clear reminders | /clear all');
 }
 
 async function cmdSave(chatId, label, value) {

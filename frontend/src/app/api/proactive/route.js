@@ -186,19 +186,33 @@ async function checkRemindersAndTasks() {
     .select('*').eq('fired', false).lte('trigger_at', now.toISOString());
 
   for (const r of (reminders || [])) {
-    const followUp = getFollowUpQuestion(r.tier);
-    await sendMessage(CHAT_ID, `⏰ *REMINDER (Tier ${r.tier})*\n\n${r.message}\n\n_${followUp}_`, {
+    const { data: claimedReminder, error: claimError } = await supabase
+      .from('reminders')
+      .update({ fired: true, last_notified_at: now.toISOString() })
+      .eq('id', r.id)
+      .eq('fired', false)
+      .select('id, message, tier')
+      .maybeSingle();
+
+    if (claimError) {
+      console.error('[Proactive] reminder claim failed:', claimError.message);
+      throw claimError;
+    }
+    if (!claimedReminder) continue;
+
+    const followUp = getFollowUpQuestion(claimedReminder.tier);
+    await sendMessage(CHAT_ID, `⏰ *REMINDER (Tier ${claimedReminder.tier})*\n\n${claimedReminder.message}\n\n_${followUp}_`, {
       reply_markup: buildReminderActionKeyboard(r.id),
     });
-    await supabase.from('reminders').update({ fired: true, last_notified_at: now.toISOString() }).eq('id', r.id);
     fired++;
   }
 
   // 3. Smart-frequency task pings
   const { data: openTasks } = await supabase.from('tasks')
     .select('*').eq('status', 'open').neq('tier', 4);
+  const actionableOpenTasks = (openTasks || []).filter((task) => !isMetaAutoTask(task));
 
-  for (const t of (openTasks || [])) {
+  for (const t of actionableOpenTasks) {
     if (shouldNotifyTask(t, now, isWaking)) {
       const followUp = getFollowUpQuestion(t.tier);
       let msg = `📋 *TASK FOLLOW-UP (Tier ${t.tier})*\n\n*${t.title}*`;
@@ -222,6 +236,7 @@ async function checkRemindersAndTasks() {
     .eq('status', 'open').not('deadline', 'is', null).lte('deadline', now.toISOString());
 
   for (const t of (overdue || [])) {
+    if (isMetaAutoTask(t)) continue;
     const daysLate = Math.ceil((now - new Date(t.deadline)) / (1000 * 60 * 60 * 24));
     const followUps = (t.follow_up_count || 0);
 
@@ -244,7 +259,7 @@ async function checkRemindersAndTasks() {
   }
 
   // 5. Proactive insight engine (deadline clusters + overcommit detection)
-  fired += await maybeSendProactiveInsights(now, openTasks || []);
+  fired += await maybeSendProactiveInsights(now, actionableOpenTasks);
 
   // 6. Idle-session consolidation (2h+ inactivity)
   fired += await maybeSummarizeIdleConversation(now);
@@ -870,17 +885,24 @@ function shouldNotifyTask(task, now, isWaking) {
   const diffHours = diffMs / (1000 * 60 * 60);
 
   if (task.tier === 1) {
-    if (!task.deadline) return diffHours >= 1;
+    if (!task.deadline) return diffHours >= 3;
     const minsToDeadline = (new Date(task.deadline) - now) / (1000 * 60);
     if (minsToDeadline > 0) {
       if (minsToDeadline <= 30) return diffMins >= 30;
       if (minsToDeadline <= 60) return diffMins >= 60;
       if (minsToDeadline <= 180) return diffMins >= 180;
-      return false;
+      return diffHours >= 6;
     }
-    return diffMins >= 30; // Overdue Tier 1: every 30 min
+    return diffHours >= 3; // Overdue Tier 1
   }
-  if (task.tier === 2) return diffHours >= 2;
-  if (task.tier === 3) return diffHours >= 4;
+  if (task.tier === 2) return diffHours >= 6;
+  if (task.tier === 3) return diffHours >= 12;
   return false;
+}
+
+function isMetaAutoTask(task) {
+  const title = (task?.title || '').toLowerCase();
+  if (!title) return true;
+  if (task?.source !== 'auto-detected') return false;
+  return /(identify top priority|review open tasks|provide a specific task|prioritize tasks|delete tasks)/i.test(title);
 }
