@@ -221,3 +221,76 @@ ALTER TABLE weekly_reviews DISABLE ROW LEVEL SECURITY;
 ALTER TABLE agent_config   DISABLE ROW LEVEL SECURITY;
 ALTER TABLE knowledge_base DISABLE ROW LEVEL SECURITY;
 ALTER TABLE ideas          DISABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- 12. GOALS
+-- High-level objectives
+-- ============================================================
+CREATE TABLE goals (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title       TEXT NOT NULL,
+  description TEXT,
+  status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'done', 'cancelled', 'snoozed')),
+  progress    INT NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 100),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_goals_status ON goals (status);
+
+-- ============================================================
+-- 13. PROJECTS
+-- Execution-level initiatives tied to goals
+-- ============================================================
+CREATE TABLE projects (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  goal_id     UUID REFERENCES goals(id) ON DELETE CASCADE,
+  title       TEXT NOT NULL,
+  description TEXT,
+  status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'done', 'cancelled', 'on-hold')),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_projects_goal ON projects (goal_id);
+CREATE INDEX idx_projects_status ON projects (status);
+
+-- ============================================================
+-- 14. HABITS
+-- Recurring routines with streak tracking
+-- ============================================================
+CREATE TABLE habits (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name            TEXT NOT NULL,
+  cadence         TEXT NOT NULL DEFAULT 'daily' CHECK (cadence IN ('daily', 'weekly')),
+  target_per_week INT NOT NULL DEFAULT 7,
+  current_streak  INT NOT NULL DEFAULT 0,
+  last_logged_at  TIMESTAMPTZ,
+  status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_habits_status ON habits (status);
+
+-- ============================================================
+-- TRIGGERS
+-- ============================================================
+CREATE TRIGGER trg_goals_updated
+  BEFORE UPDATE ON goals
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER trg_projects_updated
+  BEFORE UPDATE ON projects
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER trg_habits_updated
+  BEFORE UPDATE ON habits
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ============================================================
+-- DISABLE RLS
+-- ============================================================
+ALTER TABLE goals    DISABLE ROW LEVEL SECURITY;
+ALTER TABLE projects DISABLE ROW LEVEL SECURITY;
+ALTER TABLE habits   DISABLE ROW LEVEL SECURITY;

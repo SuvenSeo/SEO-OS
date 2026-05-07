@@ -15,6 +15,9 @@ const chatRoutes = require('./routes/chat');
 const knowledgeRoutes = require('./routes/knowledge');
 const proactiveRoutes = require('./routes/proactive');
 const auditLogRoutes = require('./routes/audit-log');
+const goalRoutes = require('./routes/goals');
+const projectRoutes = require('./routes/projects');
+const habitRoutes = require('./routes/habits');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -51,6 +54,9 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/knowledge', knowledgeRoutes);
 app.use('/api/proactive', proactiveRoutes);
 app.use('/api/audit-log', auditLogRoutes);
+app.use('/api/goals', goalRoutes);
+app.use('/api/projects', projectRoutes);
+app.use('/api/habits', habitRoutes);
 
 // ── 404 Handler ────────────────────────────────────────────
 app.use((req, res) => {
