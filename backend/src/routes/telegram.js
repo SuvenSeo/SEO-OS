@@ -62,21 +62,16 @@ async function handleMessage(chatId, text, messageId) {
   }
 
   // 3. Build full context + system prompt — pass user message for knowledge_base search
-  const systemPrompt = await getFullPrompt(text);
+  const { fullPrompt, recentMessages } = await getFullPrompt(text);
 
-  // 4. Get recent conversation for message array
-  const { data: recentMessages } = await supabase
-    .from('episodic_memory')
-    .select('role, content')
-    .order('created_at', { ascending: false })
-    .limit(10);
-
+  // 4. Use already fetched recent conversation for message array (limit to 10)
   const messages = (recentMessages || [])
+    .slice(0, 10)
     .reverse()
     .map(m => ({ role: m.role, content: m.content }));
 
   // 5. Call Groq
-  const aiResponse = await generateResponse(systemPrompt, messages);
+  const aiResponse = await generateResponse(fullPrompt, messages);
 
   // 6. Save AI response to episodic memory
   await supabase.from('episodic_memory').insert({

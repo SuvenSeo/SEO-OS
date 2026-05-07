@@ -43,16 +43,15 @@ router.post('/send', async (req, res) => {
     await supabase.from('episodic_memory').insert({ role: 'user', content: message });
 
     // Build context
-    const systemPrompt = await getFullPrompt();
+    const { fullPrompt, recentMessages } = await getFullPrompt();
 
-    // Get recent messages
-    const { data: recent } = await supabase.from('episodic_memory')
-      .select('role, content').order('created_at', { ascending: false }).limit(10);
-
-    const messages = (recent || []).reverse().map(m => ({ role: m.role, content: m.content }));
+    const messages = (recentMessages || [])
+      .slice(0, 10) // Limit to 10 for the model message array
+      .reverse()
+      .map(m => ({ role: m.role, content: m.content }));
 
     // Call Groq
-    const aiResponse = await generateResponse(systemPrompt, messages);
+    const aiResponse = await generateResponse(fullPrompt, messages);
 
     // Save AI response
     await supabase.from('episodic_memory').insert({ role: 'assistant', content: aiResponse });
