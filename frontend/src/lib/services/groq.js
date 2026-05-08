@@ -58,6 +58,42 @@ async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
           body: JSON.stringify({
             system_instruction: { parts: [{ text: systemPrompt }] },
             contents,
+            tools: [{
+              function_declarations: [
+                {
+                  name: 'web_search',
+                  description: 'Search the web for real-time information, research topics, or latest news.',
+                  parameters: {
+                    type: 'object',
+                    properties: {
+                      query: { type: 'string', description: 'The search query' },
+                    },
+                    required: ['query'],
+                  },
+                },
+                {
+                  name: 'list_gmail',
+                  description: 'List recent unread emails or search emails using a Gmail query.',
+                  parameters: {
+                    type: 'object',
+                    properties: {
+                      query: { type: 'string', description: 'Gmail search query (e.g. "is:unread", "from:university"). Defaults to "is:unread"' },
+                    },
+                  },
+                },
+                {
+                  name: 'read_gmail_content',
+                  description: 'Read the full content of a specific Gmail message by its ID.',
+                  parameters: {
+                    type: 'object',
+                    properties: {
+                      messageId: { type: 'string', description: 'The unique Gmail message ID' },
+                    },
+                    required: ['messageId'],
+                  },
+                },
+              ]
+            }],
             generationConfig: { temperature, maxOutputTokens: 2048 },
           }),
         }
@@ -76,7 +112,26 @@ async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
 
       const data = await response.json();
       geminiRoundRobin = (idx + 1) % GEMINI_KEYS.length;
-      return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      
+      const candidate = data.candidates?.[0];
+      const part = candidate?.content?.parts?.[0];
+      
+      if (part?.functionCall) {
+        return {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{
+            id: 'call_' + Math.random().toString(36).substring(7),
+            type: 'function',
+            function: {
+              name: part.functionCall.name,
+              arguments: JSON.stringify(part.functionCall.args),
+            },
+          }],
+        };
+      }
+      
+      return { role: 'assistant', content: part?.text || '' };
     } catch (err) {
       if (attempt === GEMINI_KEYS.length - 1) throw err;
     }
@@ -99,13 +154,15 @@ function classifyModelRoute(messages = []) {
   const codeHints = ['code', 'bug', 'debug', 'stack trace', 'api route', 'function', 'typescript', 'javascript', 'sql', 'regex', 'refactor'];
   const deepHints = ['strategy', 'roadmap', 'tradeoff', 'analyze', 'architecture', 'plan', 'compare'];
 
+  const toolHints = ['gmail', 'email', 'search', 'check', 'research', 'find', 'lookup', 'unread'];
+
   if (creativeHints.some(h => text.includes(h))) {
     return { type: 'creative', model: null };
   }
   if (codeHints.some(h => text.includes(h)) || /```[\s\S]*```/.test(lastUserMessage)) {
     return { type: 'code', model: CODE_MODEL };
   }
-  if (deepHints.some(h => text.includes(h)) || lastUserMessage.length > 220) {
+  if (deepHints.some(h => text.includes(h)) || toolHints.some(h => text.includes(h)) || lastUserMessage.length > 200) {
     return { type: 'deep', model: PRIMARY_CHAT_MODEL };
   }
   return { type: 'quick', model: QUICK_MODEL };
@@ -165,7 +222,7 @@ export async function generateResponse(systemPrompt, messages, options = {}) {
   const route = options.model ? { type: 'manual', model: options.model } : classifyModelRoute(messages);
 
   if (route.type === 'creative') {
-    return { content: await generateWithGemini(systemPrompt, messages, temperature) };
+    return await generateWithGemini(systemPrompt, messages, temperature);
   }
 
   let model = route.model || PRIMARY_CHAT_MODEL;
@@ -205,7 +262,8 @@ export async function generateResponse(systemPrompt, messages, options = {}) {
   }
 
   // Fallback to Gemini if Groq fails
-  return { content: await generateWithGemini(systemPrompt, messages, temperature) };
+  console.warn(`[AI] All Groq keys failed or rate-limited. Falling back to Gemini...`);
+  return await generateWithGemini(systemPrompt, messages, temperature);
 }
 
 export async function generateStructuredExtraction(prompt) {
