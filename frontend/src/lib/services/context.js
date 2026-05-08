@@ -14,7 +14,6 @@ function setCache(key, val, ttlMs) {
 const TTL_5MIN  = 5  * 60 * 1000;
 const TTL_1MIN  = 1  * 60 * 1000;
 let hasWarnedMissingKnowledgeFts = false;
-const EPISODE_FETCH_LIMIT = 40;
 const BACKGROUND_EPISODE_LIMIT = 8;
 const SESSION_BREAK_MS = 90 * 60 * 1000;
 const CONTEXT_NOISE_PATTERNS = [
@@ -239,8 +238,6 @@ async function buildContext(userMessage = '') {
   const cachedIdeas   = getCache('ideas');
 
   const promises = [
-    // Always fresh: episodic memory window for smart context selection
-    supabase.from('episodic_memory').select('role, content, created_at').order('created_at', { ascending: false }).limit(EPISODE_FETCH_LIMIT),
     // Always fresh: open tasks
     supabase.from('tasks').select('id, title, description, deadline, priority, status, follow_up_count, tier').in('status', ['open', 'snoozed']).order('priority', { ascending: true }),
     // Cached 1 min: working memory
@@ -254,7 +251,6 @@ async function buildContext(userMessage = '') {
   ];
 
   const [
-    { data: episodes },
     { data: tasks },
     { data: workingMemory },
     { data: coreMemory },
