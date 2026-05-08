@@ -96,6 +96,7 @@ export async function processExchange(userMessage, aiResponse) {
     snoozed: 0,
     cleared_tasks: 0,
     cleared_reminders: 0,
+    patterns: 0,
   };
 
   if (cleanupIntent.clearTasks || cleanupIntent.clearReminders) {
@@ -152,6 +153,13 @@ Extract the following as JSON:
       "snooze_until": "ISO date string for when to re-surface it",
       "duration_description": "e.g. '2 hours', 'tomorrow morning'"
     }
+  ],
+  "patterns": [
+    {
+      "observation": "detailed observation of a habit, pattern, or connection",
+      "confidence": "high|medium|low",
+      "category": "productivity|work|personal|uni"
+    }
   ]
 }
 
@@ -170,6 +178,7 @@ Rules:
 - For tasks: look for action items, things to do, commitments made.
 - For reminders: look for specific times mentioned ("remind me at...", "tomorrow at...").
 - For ideas: look for brainstorming, "what if", project ideas, things to explore.
+- For patterns: look for behavioral loops (procrastination triggers), project connections (e.g. Ardeno design for FullTank), or repeating habits. Only extract if evidenced in this specific exchange.
 - For memory updates: look for new facts about the user (preferences, decisions, updates).
 - Deadlines should be in ISO 8601 format. Use current date context: ${new Date().toISOString()}
 - If nothing was detected for a category, return an empty array.
@@ -310,6 +319,19 @@ Return ONLY valid JSON.`;
       }
     }
 
+    // Insert detected patterns
+    if (extracted.patterns && extracted.patterns.length > 0) {
+      for (const pattern of extracted.patterns) {
+        if (!pattern.observation) continue;
+        const { error } = await supabase.from('patterns').insert({
+          observation: pattern.observation,
+          confidence: pattern.confidence || 'medium',
+          category: pattern.category || 'general',
+        });
+        if (!error) summary.patterns++;
+      }
+    }
+
     return summary;
   } catch (error) {
     console.error('[PostProcessor] Error:', error.message);
@@ -328,6 +350,7 @@ export function formatSummary(summary) {
   if (summary.reminders > 0) parts.push(`⏰ ${summary.reminders} reminder(s) set`);
   if (summary.snoozed > 0) parts.push(`😴 ${summary.snoozed} snoozed`);
   if (summary.ideas > 0) parts.push(`💡 ${summary.ideas} idea(s) captured`);
+  if (summary.patterns > 0) parts.push(`📊 ${summary.patterns} pattern(s) detected`);
   if (summary.memory_updates > 0) parts.push(`🧠 ${summary.memory_updates} memory update(s)`);
 
   if (parts.length === 0) return '';

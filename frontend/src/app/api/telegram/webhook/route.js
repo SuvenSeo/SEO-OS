@@ -954,7 +954,6 @@ async function handleMessage(chatId, text, messageId) {
     ]);
   }
 }
-}
 
 async function handleCommand(chatId, text, messageId) {
   const [command] = text.split(' ');
