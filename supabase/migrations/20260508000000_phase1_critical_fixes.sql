@@ -150,6 +150,31 @@ CREATE TABLE IF NOT EXISTS public.task_templates (
 );
 
 -- ---------------------------------------------------------------------------
+-- 12b) Prerequisite tables for milestones FK (idempotent - safe if already exist)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.goals (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title       TEXT NOT NULL,
+  description TEXT,
+  status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','paused','done')),
+  target_date TIMESTAMPTZ,
+  progress    INT NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 100),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.projects (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  goal_id     UUID REFERENCES public.goals(id) ON DELETE SET NULL,
+  title       TEXT NOT NULL,
+  description TEXT,
+  status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','blocked','done')),
+  priority    INT NOT NULL DEFAULT 3 CHECK (priority >= 1 AND priority <= 5),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ---------------------------------------------------------------------------
 -- 13) Milestones (project checkpoints)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.milestones (
