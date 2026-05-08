@@ -492,10 +492,13 @@ export async function handleMessage(chatId, text, messageId) {
   const maxToolIterations = 5;
   let iteration = 0;
 
+  // Optimization: Hoist getFullPrompt outside the loop to avoid redundant DB queries
+  // and expensive semantic re-ranking during multi-step tool calls.
+  const systemPrompt = await getFullPrompt(processedText);
+
   while (iteration < maxToolIterations) {
     iteration++;
     
-    const systemPrompt = await getFullPrompt(processedText);
     const message = await generateResponse(systemPrompt, messages);
 
     messages.push(message);

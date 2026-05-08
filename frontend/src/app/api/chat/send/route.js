@@ -36,10 +36,14 @@ export async function POST(request) {
     const maxToolIterations = 5;
     let iteration = 0;
 
+    // Optimization: Hoist getFullPrompt outside the loop.
+    // Base context (tasks, core memory) doesn't change within a single tool turn,
+    // and history is handled separately in the messages array.
+    const systemPrompt = await getFullPrompt(message);
+
     while (iteration < maxToolIterations) {
       iteration++;
       
-      const systemPrompt = await getFullPrompt(message);
       const aiMessage = await generateResponse(systemPrompt, messages);
 
       // Add assistant's message to local loop history
