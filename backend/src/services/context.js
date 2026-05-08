@@ -14,20 +14,7 @@ async function buildContext(userMessage = '') {
   const timeContext = `CURRENT DATE/TIME: ${now.toISOString()} (Sri Lanka: ${now.toLocaleString('en-US', { timeZone: 'Asia/Colombo' })})`;
   sections.push(timeContext);
 
-  // 1. Last 30 episodic memories (recent conversation history)
-  const { data: episodes } = await supabase
-    .from('episodic_memory')
-    .select('role, content, created_at')
-    .order('created_at', { ascending: false })
-    .limit(30);
-
-  if (episodes && episodes.length > 0) {
-    const history = episodes
-      .reverse()
-      .map(e => `[${e.role}] ${e.content}`)
-      .join('\n');
-    sections.push(`RECENT CONVERSATION HISTORY:\n${history}`);
-  }
+  // (History is now handled via the messages array in the chat completion call)
 
   // 2. All open tasks (sorted by priority, then tier)
   const { data: tasks } = await supabase

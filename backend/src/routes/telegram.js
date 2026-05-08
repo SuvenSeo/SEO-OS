@@ -67,33 +67,38 @@ async function handleMessage(chatId, text, messageId) {
   const { data: recentMessages } = await supabase
     .from('episodic_memory')
     .select('role, content')
-    .order('created_at', { ascending: false })
-    .limit(10);
-
-  let messages = (recentMessages || [])
+  // 3. Prepare message history (filtered for better focus)
+  const messages = (recentMessages || [])
     .reverse()
-    .map(m => ({ role: m.role, content: m.content }));
+    .map(m => {
+      const msg = { role: m.role, content: m.content };
+      if (m.tool_calls) msg.tool_calls = m.tool_calls;
+      return msg;
+    });
 
-  // 4. Start Tool Loop
+  // 4. Start Tool Loop (Proactive Tool Engagement)
   let finalResponse = '';
-  let maxToolIterations = 5;
+  const maxToolIterations = 5;
   let iteration = 0;
 
   while (iteration < maxToolIterations) {
     iteration++;
     
+    // Always get fresh context and prompt
     const systemPrompt = await getFullPrompt(text);
+    
+    // Call AI with tools enabled
     const choice = await generateResponse(systemPrompt, messages);
     const { message } = choice;
 
-    // If no tool calls, this is our final answer
+    // Add assistant's message to local loop history
+    messages.push(message);
+
+    // If no tool calls, this is the final answer
     if (!message.tool_calls || message.tool_calls.length === 0) {
       finalResponse = message.content;
       break;
     }
-
-    // Add assistant's tool-call message to history
-    messages.push(message);
 
     // Process each tool call
     for (const toolCall of message.tool_calls) {
