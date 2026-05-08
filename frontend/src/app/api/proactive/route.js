@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 export const dynamic = 'force-dynamic';
 import supabase from '@/lib/config/supabase';
+import { requireCronAuth } from '@/lib/middleware/auth';
 import { listMessagesRaw } from '@/lib/services/gmail';
 import { generateStructuredExtraction, generateResponse } from '@/lib/services/groq';
 
@@ -13,6 +14,9 @@ const EPISODIC_MEMORY_RETENTION = 50; // Keep last 50 episodic memories
  * Runs via GitHub Actions (not Vercel cron).
  */
 export async function GET(req) {
+  const authError = requireCronAuth(req);
+  if (authError) return authError;
+
   // Idempotency guard — skip if last run was < 5 minutes ago
   const { data: lastRun } = await supabase
     .from('working_memory')
