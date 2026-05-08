@@ -14,6 +14,37 @@ function getGmailClient() {
   return google.gmail({ version: 'v1', auth });
 }
 
+export async function listMessagesRaw(query = 'is:unread', maxResults = 10) {
+  try {
+    const gmail = getGmailClient();
+    const res = await gmail.users.messages.list({
+      userId: 'me',
+      q: query,
+      maxResults,
+    });
+
+    const messages = res.data.messages || [];
+    if (messages.length === 0) return [];
+
+    return await Promise.all(
+      messages.map(async (m) => {
+        const msg = await gmail.users.messages.get({ userId: 'me', id: m.id, format: 'metadata', metadataHeaders: ['Subject', 'From', 'Date'] });
+        const headers = msg.data.payload.headers;
+        return {
+          id: m.id,
+          subject: headers.find(h => h.name === 'Subject')?.value || '(No Subject)',
+          from: headers.find(h => h.name === 'From')?.value || '(Unknown Sender)',
+          date: headers.find(h => h.name === 'Date')?.value || '',
+          snippet: msg.data.snippet || '',
+        };
+      })
+    );
+  } catch (error) {
+    console.error('[Gmail] Raw List Error:', error.message);
+    throw error;
+  }
+}
+
 export async function listMessages(query = 'is:unread') {
   try {
     const gmail = getGmailClient();
