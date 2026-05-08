@@ -5,6 +5,8 @@ import { sendMessage, sendChatAction } from '@/lib/services/telegram';
 import { getFullPrompt } from '@/lib/services/context';
 import { processExchange, formatSummary } from '@/lib/services/postProcessor';
 import { downloadTelegramFile, readUrl, analyzeImage, parsePdf, parseWord, getBestPhotoFileId, extractUrls } from '@/lib/services/fileProcessor';
+import { searchWeb } from '@/lib/services/search';
+import { listMessages, getMessageContent } from '@/lib/services/gmail';
 
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -801,15 +803,23 @@ async function handleMessage(chatId, text, messageId) {
     })(),
   ]);
 
+  // 3. Prepare message history (filtered for better focus)
   const { data: recentRows } = await supabase
     .from('episodic_memory')
-    .select('role, content')
+    .select('*')
     .order('created_at', { ascending: false })
-    .limit(20);
+    .limit(10);
 
   const messages = (recentRows || [])
     .reverse()
-    .map(m => ({ role: m.role, content: m.content }));
+    .map(m => {
+      const msg = { role: m.role, content: m.content };
+      if (m.tool_calls) msg.tool_calls = m.tool_calls;
+      if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+      if (m.name) msg.name = m.name;
+      return msg;
+    });
+
   const lastAssistantText = [...messages].reverse().find((m) => m.role === 'assistant')?.content || '';
 
   // Quick human-first greeting flow
@@ -867,39 +877,83 @@ async function handleMessage(chatId, text, messageId) {
     return;
   }
 
-  const systemPrompt = await getFullPrompt(processedText);
+  // 4. Start Tool Loop (Proactive Tool Engagement)
+  let finalResponse = '';
+  const maxToolIterations = 5;
+  let iteration = 0;
 
-  // Generate AI response
-  let aiResponse;
-  try {
-    aiResponse = await generateResponse(systemPrompt, messages);
-  } catch (err) {
-    console.error('[Telegram] AI generation failed:', err.message);
-    await sendMessage(chatId, '⚠️ All AI providers are currently down. Try again in a minute.');
-    return;
+  while (iteration < maxToolIterations) {
+    iteration++;
+    
+    const systemPrompt = await getFullPrompt(processedText);
+    const message = await generateResponse(systemPrompt, messages);
+
+    // Add assistant's message to local loop history
+    messages.push(message);
+
+    // Save assistant's message (including tool_calls) to episodic memory
+    await supabase.from('episodic_memory').insert({
+      role: 'assistant',
+      content: message.content || '',
+      tool_calls: message.tool_calls || null,
+    });
+
+    // If no tool calls, this is the final answer
+    if (!message.tool_calls || message.tool_calls.length === 0) {
+      finalResponse = message.content;
+      break;
+    }
+
+    // Process each tool call
+    for (const toolCall of message.tool_calls) {
+      const { name, arguments: argsString } = toolCall.function;
+      const args = JSON.parse(argsString);
+      let result = '';
+
+      console.log(`[Telegram] Executing tool: ${name}`, args);
+
+      if (name === 'web_search') {
+        result = await searchWeb(args.query);
+      } else if (name === 'list_gmail') {
+        result = await listMessages(args.query);
+      } else if (name === 'read_gmail_content') {
+        result = await getMessageContent(args.messageId);
+      } else {
+        result = 'Unknown tool: ' + name;
+      }
+
+      // Add tool result to local history
+      const toolResultMessage = {
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        name: name,
+        content: result,
+      };
+      messages.push(toolResultMessage);
+
+      // Save tool result to episodic memory
+      await supabase.from('episodic_memory').insert(toolResultMessage);
+    }
   }
 
-  const safeResponse = sanitizeAssistantReply(aiResponse, messages, processedText, lastAssistantText);
+  // 6. Finalize and Reply
+  if (finalResponse) {
+    const safeResponse = sanitizeAssistantReply(finalResponse, messages, processedText, lastAssistantText);
+    await sendMessage(chatId, safeResponse);
 
-  // Send reply FIRST — user sees it immediately
-  await sendMessage(chatId, safeResponse);
-  console.log('[Telegram] AI response sent');
-
-  // Skip post-processing for short/casual messages (saves an API call)
-  const isShort = processedText.length < 15 && !processedText.match(/remind|task|deadline|schedule|set|save/i);
-
-  // Save AI response + post-process in background (user already has reply)
-  await Promise.all([
-    supabase.from('episodic_memory').insert({ role: 'assistant', content: safeResponse }),
-    isShort ? Promise.resolve() : processExchange(processedText, safeResponse).then(summary => {
-      const summaryText = formatSummary(summary);
-      if (summaryText.trim()) {
-        return sendMessage(chatId, summaryText);
-      }
-    }).catch(err => console.error('[Telegram] Post-processor error:', err.message)),
-    trackEntitiesInBackground(processedText).catch(err => console.error('[Telegram] Entity tracking error:', err.message)),
-    trackMoodInBackground(processedText).catch(err => console.error('[Telegram] Mood tracking error:', err.message)),
-  ]);
+    // Skip post-processing for short/casual messages
+    const isShort = processedText.length < 15 && !processedText.match(/remind|task|deadline|schedule|set|save/i);
+    
+    await Promise.all([
+      isShort ? Promise.resolve() : processExchange(processedText, safeResponse).then(summary => {
+        const summaryText = formatSummary(summary);
+        if (summaryText.trim()) return sendMessage(chatId, summaryText);
+      }).catch(err => console.error('[Telegram] Post-processor error:', err.message)),
+      trackEntitiesInBackground(processedText).catch(err => console.error('[Telegram] Entity tracking error:', err.message)),
+      trackMoodInBackground(processedText).catch(err => console.error('[Telegram] Mood tracking error:', err.message)),
+    ]);
+  }
+}
 }
 
 async function handleCommand(chatId, text, messageId) {

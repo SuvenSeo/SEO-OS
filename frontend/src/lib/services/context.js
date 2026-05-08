@@ -267,10 +267,7 @@ async function buildContext(userMessage = '') {
   if (!cachedPatterns && patterns)    setCache('patterns',    patterns,     TTL_5MIN);
   if (!cachedIdeas    && ideas)       setCache('ideas',       ideas,        TTL_5MIN);
 
-  if (episodes && episodes.length > 0) {
-    const history = selectConversationLines(episodes).join('\n');
-    sections.push(`RECENT CONVERSATION HISTORY:\n${history}`);
-  }
+  // (History is now handled via the messages array in the chat completion call to prevent redundancy)
 
   if (!greetingOnly && tasks && tasks.length > 0) {
     const taskList = tasks.map(t => {

@@ -111,12 +111,61 @@ function classifyModelRoute(messages = []) {
   return { type: 'quick', model: QUICK_MODEL };
 }
 
+const TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the web for real-time information, research topics, or latest news.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The search query' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_gmail',
+      description: 'List recent unread emails or search emails using a Gmail query.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Gmail search query (e.g. "is:unread", "from:university"). Defaults to "is:unread"' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_gmail_content',
+      description: 'Read the full content of a specific Gmail message by its ID.',
+      parameters: {
+        type: 'object',
+        properties: {
+          messageId: { type: 'string', description: 'The unique Gmail message ID' },
+        },
+        required: ['messageId'],
+      },
+    },
+  },
+];
+
 export async function generateResponse(systemPrompt, messages, options = {}) {
-  const { temperature = 0.7, max_tokens = 1500 } = options;
+  const { 
+    temperature = 0.7, 
+    max_tokens = 2048, 
+    useTools = true 
+  } = options;
+  
   const route = options.model ? { type: 'manual', model: options.model } : classifyModelRoute(messages);
 
   if (route.type === 'creative') {
-    return generateWithGemini(systemPrompt, messages, temperature);
+    return { content: await generateWithGemini(systemPrompt, messages, temperature) };
   }
 
   let model = route.model || PRIMARY_CHAT_MODEL;
@@ -136,50 +185,34 @@ export async function generateResponse(systemPrompt, messages, options = {}) {
         messages: fullMessages,
         temperature,
         max_tokens,
+        tools: useTools ? TOOLS : undefined,
+        tool_choice: useTools ? 'auto' : undefined,
       });
-      return completion.choices[0]?.message?.content || '';
+      
+      return completion.choices[0]?.message;
     } catch (error) {
       if ((error.status === 400 || error.status === 404) && model !== PRIMARY_CHAT_MODEL) {
-        console.warn(`[Groq] Model ${model} unavailable, falling back to ${PRIMARY_CHAT_MODEL}`);
         model = PRIMARY_CHAT_MODEL;
         continue;
       }
       if (error.status === 429 || error.status === 503) {
-        // Parse reset time from error if available, default 1 hour
         const resetMs = 60 * 60 * 1000;
         rateLimitedUntil[idx] = Date.now() + resetMs;
-        console.warn(`[Groq] Key ${idx} (${model}) rate limited, rotating...`);
         continue;
       }
-      console.error('[Groq] Error:', error.message);
       throw error;
     }
   }
 
-  // All Groq keys exhausted for primary model — try fallback model
-  console.warn('[Groq] All keys rate limited on primary model, trying fallback model...');
-  const { client: fbClient, idx: fbIdx } = getAvailableGroqClient();
-  try {
-    const completion = await fbClient.chat.completions.create({
-      model: FALLBACK_MODEL,
-      messages: fullMessages,
-      temperature,
-      max_tokens,
-    });
-    return completion.choices[0]?.message?.content || '';
-  } catch (fallbackError) {
-    if (fallbackError.status === 429 || fallbackError.status === 503) {
-      console.warn('[Groq] Fallback model also limited, switching to Gemini...');
-      return await generateWithGemini(systemPrompt, messages, temperature);
-    }
-    throw fallbackError;
-  }
+  // Fallback to Gemini if Groq fails
+  return { content: await generateWithGemini(systemPrompt, messages, temperature) };
 }
 
 export async function generateStructuredExtraction(prompt) {
-  return generateResponse(
+  const message = await generateResponse(
     'You are a precise data extraction tool. Always respond with valid JSON only, no additional text.',
     [{ role: 'user', content: prompt }],
-    { model: EXTRACTION_MODEL, temperature: 0.2, max_tokens: 1024 }
+    { model: EXTRACTION_MODEL, temperature: 0.2, max_tokens: 1024, useTools: false }
   );
+  return message.content || '';
 }
