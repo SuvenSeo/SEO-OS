@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+export const dynamic = 'force-dynamic';
 import supabase from '@/lib/config/supabase';
 import { generateResponse, generateStructuredExtraction } from '@/lib/services/groq';
 import { sendMessage, sendChatAction } from '@/lib/services/telegram';
@@ -1248,7 +1249,7 @@ async function cmdReadUrl(chatId, url) {
       },
       'cmdReadUrl'
     );
-    const systemPrompt = await import('@/lib/services/context').then(m => m.getFullPrompt(url));
+    const systemPrompt = await getFullPrompt(url);
     const summary = await generateResponse(systemPrompt, [
       { role: 'user', content: `Summarize this content from ${url}:\n\n${content}` }
     ]);
@@ -1288,7 +1289,7 @@ async function cmdResearch(chatId, topic) {
       'cmdResearch'
     );
 
-    const systemPrompt = await import('@/lib/services/context').then(m => m.getFullPrompt(topic));
+    const systemPrompt = await getFullPrompt(topic);
     const report = await generateResponse(systemPrompt, [
       { role: 'user', content: `Based on this research about "${topic}", give me a concise, insightful summary with the most important points and what I should know:\n\n${sources.substring(0, 3000)}` }
     ]);

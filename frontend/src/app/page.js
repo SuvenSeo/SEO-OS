@@ -268,7 +268,7 @@ export default function Dashboard() {
                 Next Step
               </p>
               <p className="text-xs text-[var(--text-secondary)] leading-relaxed italic">
-                "University coursework (CM1603) is your primary friction point today. Finish the ERD before the walk at 7."
+                &quot;University coursework (CM1603) is your primary friction point today. Finish the ERD before the walk at 7.&quot;
               </p>
             </div>
           </div>

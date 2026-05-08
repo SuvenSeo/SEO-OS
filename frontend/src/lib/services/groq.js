@@ -1,25 +1,29 @@
 import Groq from 'groq-sdk';
 
-// ─── Multi-key pool ───────────────────────────────────────────────────────────
-// Set GROQ_API_KEYS as comma-separated keys in Vercel env vars for unlimited usage
-// e.g. GROQ_API_KEYS=key1,key2,key3
-// Falls back to single GROQ_API_KEY if GROQ_API_KEYS not set
-const GROQ_KEYS = (process.env.GROQ_API_KEYS || process.env.GROQ_API_KEY || '')
-  .split(',').map(k => k.trim()).filter(Boolean);
-
-const GEMINI_KEYS = (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '')
-  .split(',').map(k => k.trim()).filter(Boolean);
-
-if (GROQ_KEYS.length === 0) console.error('[AI] No Groq API keys configured!');
-
-// Lazy-init Groq clients, one per key
-const groqClients = GROQ_KEYS.map(key => new Groq({ apiKey: key }));
-
-// Track rate-limited keys: index -> expiry timestamp
-const rateLimitedUntil = {};
+/**
+ * Lazy initialization of Groq clients to prevent build-time crashes.
+ * Supports multiple keys for high-volume handling.
+ */
+let groqClients = [];
+let rateLimitedUntil = {};
 let groqRoundRobin = 0;
 
+function initGroq() {
+  if (groqClients.length > 0) return;
+  const keys = (process.env.GROQ_API_KEYS || process.env.GROQ_API_KEY || '')
+    .split(',').map(k => k.trim()).filter(Boolean);
+  
+  if (keys.length === 0) {
+    console.warn('[AI] No Groq API keys configured');
+    return;
+  }
+  groqClients = keys.map(key => new Groq({ apiKey: key }));
+}
+
 function getAvailableGroqClient() {
+  initGroq();
+  if (groqClients.length === 0) return null;
+
   const now = Date.now();
   for (let i = 0; i < groqClients.length; i++) {
     const idx = (groqRoundRobin + i) % groqClients.length;
@@ -29,7 +33,9 @@ function getAvailableGroqClient() {
     }
   }
   // All rate limited — return the soonest-available
-  const soonest = Object.entries(rateLimitedUntil).sort(([, a], [, b]) => a - b)[0];
+  const entries = Object.entries(rateLimitedUntil);
+  if (entries.length === 0) return { client: groqClients[0], idx: 0 };
+  const soonest = entries.sort(([, a], [, b]) => a - b)[0];
   const idx = parseInt(soonest[0]);
   return { client: groqClients[idx], idx };
 }
@@ -38,15 +44,18 @@ function getAvailableGroqClient() {
 let geminiRoundRobin = 0;
 
 async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
-  if (GEMINI_KEYS.length === 0) throw new Error('[AI] No Gemini API keys configured');
+  const geminiKeys = (process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '')
+    .split(',').map(k => k.trim()).filter(Boolean);
 
-  for (let attempt = 0; attempt < GEMINI_KEYS.length; attempt++) {
-    const idx = (geminiRoundRobin + attempt) % GEMINI_KEYS.length;
-    const apiKey = GEMINI_KEYS[idx];
+  if (geminiKeys.length === 0) throw new Error('[AI] No Gemini API keys configured');
+
+  for (let attempt = 0; attempt < geminiKeys.length; attempt++) {
+    const idx = (geminiRoundRobin + attempt) % geminiKeys.length;
+    const apiKey = geminiKeys[idx];
 
     const contents = messages.map(m => ({
       role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }],
+      parts: [{ text: m.content || '' }],
     }));
 
     try {
@@ -77,7 +86,7 @@ async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
                   parameters: {
                     type: 'object',
                     properties: {
-                      query: { type: 'string', description: 'Gmail search query (e.g. "is:unread", "from:university"). Defaults to "is:unread"' },
+                      query: { type: 'string', description: 'Gmail search query. Defaults to "is:unread"' },
                     },
                   },
                 },
@@ -99,7 +108,7 @@ async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
                     type: 'object',
                     properties: {
                       message: { type: 'string', description: 'The reminder message' },
-                      triggerAt: { type: 'string', description: 'ISO timestamp for when to trigger the reminder (Colombo time is UTC+5:30)' },
+                      triggerAt: { type: 'string', description: 'ISO timestamp for when to trigger the reminder' },
                     },
                     required: ['message', 'triggerAt'],
                   },
@@ -125,8 +134,7 @@ async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
       );
 
       if (response.status === 429) {
-        console.warn(`[Gemini] Key ${idx} rate limited, trying next...`);
-        geminiRoundRobin = (idx + 1) % GEMINI_KEYS.length;
+        geminiRoundRobin = (idx + 1) % geminiKeys.length;
         continue;
       }
 
@@ -136,7 +144,7 @@ async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
       }
 
       const data = await response.json();
-      geminiRoundRobin = (idx + 1) % GEMINI_KEYS.length;
+      geminiRoundRobin = (idx + 1) % geminiKeys.length;
       
       const candidate = data.candidates?.[0];
       const part = candidate?.content?.parts?.[0];
@@ -158,7 +166,7 @@ async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
       
       return { role: 'assistant', content: part?.text || '' };
     } catch (err) {
-      if (attempt === GEMINI_KEYS.length - 1) throw err;
+      if (attempt === geminiKeys.length - 1) throw err;
     }
   }
   throw new Error('[AI] All Gemini keys exhausted');
@@ -167,43 +175,17 @@ async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
 // ─── Main generate function ───────────────────────────────────────────────────
 const PRIMARY_CHAT_MODEL = 'llama-3.3-70b-versatile';
 const QUICK_MODEL = 'llama-3.1-8b-instant';
-const CODE_MODEL = process.env.GROQ_CODE_MODEL || 'qwen-2.5-coder-32b';
-const FALLBACK_MODEL = 'llama3-70b-8192';
 const EXTRACTION_MODEL = 'llama-3.1-8b-instant';
-
-function classifyModelRoute(messages = []) {
-  const lastUserMessage = [...messages].reverse().find(m => m.role === 'user')?.content || '';
-  const text = lastUserMessage.toLowerCase();
-
-  const creativeHints = ['poem', 'story', 'caption', 'creative', 'rewrite this nicely', 'brainstorm names'];
-  const codeHints = ['code', 'bug', 'debug', 'stack trace', 'api route', 'function', 'typescript', 'javascript', 'sql', 'regex', 'refactor'];
-  const deepHints = ['strategy', 'roadmap', 'tradeoff', 'analyze', 'architecture', 'plan', 'compare'];
-
-  const toolHints = ['gmail', 'email', 'search', 'check', 'research', 'find', 'lookup', 'unread', 'remind', 'task', 'reminder'];
-
-  if (creativeHints.some(h => text.includes(h))) {
-    return { type: 'creative', model: null };
-  }
-  if (codeHints.some(h => text.includes(h)) || /```[\s\S]*```/.test(lastUserMessage)) {
-    return { type: 'code', model: CODE_MODEL };
-  }
-  if (deepHints.some(h => text.includes(h)) || toolHints.some(h => text.includes(h)) || lastUserMessage.length > 200) {
-    return { type: 'deep', model: PRIMARY_CHAT_MODEL };
-  }
-  return { type: 'quick', model: QUICK_MODEL };
-}
 
 const TOOLS = [
   {
     type: 'function',
     function: {
       name: 'web_search',
-      description: 'Search the web for real-time information, research topics, or latest news.',
+      description: 'Search the web for real-time information.',
       parameters: {
         type: 'object',
-        properties: {
-          query: { type: 'string', description: 'The search query' },
-        },
+        properties: { query: { type: 'string' } },
         required: ['query'],
       },
     },
@@ -212,12 +194,10 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'list_gmail',
-      description: 'List recent unread emails or search emails using a Gmail query.',
+      description: 'List unread emails.',
       parameters: {
         type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Gmail search query (e.g. "is:unread", "from:university"). Defaults to "is:unread"' },
-        },
+        properties: { query: { type: 'string' } },
       },
     },
   },
@@ -225,12 +205,10 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'read_gmail_content',
-      description: 'Read the full content of a specific Gmail message by its ID.',
+      description: 'Read a Gmail message.',
       parameters: {
         type: 'object',
-        properties: {
-          messageId: { type: 'string', description: 'The unique Gmail message ID' },
-        },
+        properties: { messageId: { type: 'string' } },
         required: ['messageId'],
       },
     },
@@ -239,12 +217,12 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'set_reminder',
-      description: 'Set a personal reminder for Suven at a specific time.',
+      description: 'Set a reminder.',
       parameters: {
         type: 'object',
         properties: {
-          message: { type: 'string', description: 'The reminder message' },
-          triggerAt: { type: 'string', description: 'ISO timestamp for when to trigger the reminder' },
+          message: { type: 'string' },
+          triggerAt: { type: 'string' },
         },
         required: ['message', 'triggerAt'],
       },
@@ -254,13 +232,13 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'add_task',
-      description: 'Add a new task to Suvens to-do list.',
+      description: 'Add a task.',
       parameters: {
         type: 'object',
         properties: {
-          title: { type: 'string', description: 'The task title' },
-          priority: { type: 'number', description: 'Priority 1 (high) to 4 (low)' },
-          deadline: { type: 'string', description: 'Optional ISO timestamp for deadline' },
+          title: { type: 'string' },
+          priority: { type: 'number' },
+          deadline: { type: 'string' },
         },
         required: ['title', 'priority'],
       },
@@ -275,58 +253,41 @@ export async function generateResponse(systemPrompt, messages, options = {}) {
     useTools = true 
   } = options;
   
-  const route = options.model ? { type: 'manual', model: options.model } : classifyModelRoute(messages);
-
-  if (route.type === 'creative') {
-    return await generateWithGemini(systemPrompt, messages, temperature);
-  }
-
-  let model = route.model || PRIMARY_CHAT_MODEL;
-
+  const model = options.model || PRIMARY_CHAT_MODEL;
+  
   const fullMessages = [
     { role: 'system', content: systemPrompt },
     ...messages,
   ];
 
-  // Try each available Groq key in rotation
-  for (let attempt = 0; attempt < Math.max(GROQ_KEYS.length, 1); attempt++) {
-    const { client, idx } = getAvailableGroqClient();
-
-    try {
-      const completion = await client.chat.completions.create({
-        model,
-        messages: fullMessages,
-        temperature,
-        max_tokens,
-        tools: useTools ? TOOLS : undefined,
-        tool_choice: useTools ? 'auto' : undefined,
-      });
-      
-      return completion.choices[0]?.message;
-    } catch (error) {
-      if ((error.status === 400 || error.status === 404) && model !== PRIMARY_CHAT_MODEL) {
-        model = PRIMARY_CHAT_MODEL;
-        continue;
-      }
-      if (error.status === 429 || error.status === 503) {
-        const resetMs = 60 * 60 * 1000;
-        rateLimitedUntil[idx] = Date.now() + resetMs;
-        continue;
-      }
-      throw error;
-    }
+  const available = getAvailableGroqClient();
+  if (!available) {
+    console.warn('[AI] Falling back to Gemini (No Groq keys)');
+    return await generateWithGemini(systemPrompt, messages, temperature);
   }
 
-  // Fallback to Gemini if Groq fails
-  console.warn(`[AI] All Groq keys failed or rate-limited. Falling back to Gemini...`);
-  return await generateWithGemini(systemPrompt, messages, temperature);
+  try {
+    const completion = await available.client.chat.completions.create({
+      model,
+      messages: fullMessages,
+      temperature,
+      max_tokens,
+      tools: useTools ? TOOLS : undefined,
+      tool_choice: useTools ? 'auto' : undefined,
+    });
+    
+    return completion.choices[0]?.message;
+  } catch (error) {
+    console.error('[AI] Groq Error:', error.message);
+    return await generateWithGemini(systemPrompt, messages, temperature);
+  }
 }
 
 export async function generateStructuredExtraction(prompt) {
   const message = await generateResponse(
-    'You are a precise data extraction tool. Always respond with valid JSON only, no additional text.',
+    'You are a precise data extraction tool. Always respond with valid JSON only.',
     [{ role: 'user', content: prompt }],
-    { model: EXTRACTION_MODEL, temperature: 0.2, max_tokens: 1024, useTools: false }
+    { model: EXTRACTION_MODEL, temperature: 0.1, max_tokens: 1024, useTools: false }
   );
   return message.content || '';
 }
