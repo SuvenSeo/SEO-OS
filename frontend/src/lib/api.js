@@ -1,7 +1,9 @@
+// Empty string is correct — Next.js API routes are same-origin, so relative paths work.
 const API_URL = '';
-// SECURITY: NEXT_PUBLIC_CRON_SECRET is embedded in the browser bundle — treat it as public.
-// Prefer dedicated dashboard auth later; removing this would break dashboard API calls until replaced.
-const TOKEN = process.env.NEXT_PUBLIC_CRON_SECRET || '';
+// Server-side only token for API auth. Falls back to NEXT_PUBLIC_ for backwards compat.
+const TOKEN = typeof window === 'undefined'
+  ? (process.env.CRON_SECRET || process.env.NEXT_PUBLIC_CRON_SECRET || '')
+  : '';
 
 async function request(path, options = {}) {
   const { method = 'GET', body, params } = options;
@@ -89,5 +91,40 @@ export const api = {
   auditLog: {
     list: () => request('/api/audit-log'),
     create: (body) => request('/api/audit-log', { method: 'POST', body }),
+  },
+  knowledge: {
+    list: (params) => request('/api/knowledge', { params }),
+    create: (body) => request('/api/knowledge', { method: 'POST', body }),
+    delete: (id) => request(`/api/knowledge?id=${id}`, { method: 'DELETE' }),
+  },
+  entities: {
+    list: (params) => request('/api/entities', { params }),
+  },
+  notifications: {
+    list: (params) => request('/api/notifications', { params }),
+    markRead: (ids) => request('/api/notifications', { method: 'PUT', body: { ids } }),
+  },
+  journal: {
+    list: (params) => request('/api/journal', { params }),
+    create: (body) => request('/api/journal', { method: 'POST', body }),
+  },
+  mood: {
+    list: (params) => request('/api/mood', { params }),
+    create: (body) => request('/api/mood', { method: 'POST', body }),
+  },
+  clients: {
+    list: (params) => request('/api/clients', { params }),
+    get: (id) => request(`/api/clients/${id}`),
+    create: (body) => request('/api/clients', { method: 'POST', body }),
+    update: (id, body) => request(`/api/clients/${id}`, { method: 'PUT', body }),
+    delete: (id) => request(`/api/clients/${id}`, { method: 'DELETE' }),
+  },
+  expenses: {
+    list: (params) => request('/api/expenses', { params }),
+    create: (body) => request('/api/expenses', { method: 'POST', body }),
+  },
+  modules: {
+    list: (params) => request('/api/modules', { params }),
+    create: (body) => request('/api/modules', { method: 'POST', body }),
   },
 };

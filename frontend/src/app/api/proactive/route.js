@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 export const dynamic = 'force-dynamic';
 import supabase from '@/lib/config/supabase';
 import { listMessagesRaw } from '@/lib/services/gmail';
-import { generateStructuredExtraction } from '@/lib/services/groq';
+import { generateStructuredExtraction, generateResponse } from '@/lib/services/groq';
 
 const CHAT_ID = '725902251'; // Suven's Telegram ID
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -10,9 +10,26 @@ const EPISODIC_MEMORY_RETENTION = 50; // Keep last 50 episodic memories
 
 /**
  * Main cron handler for proactive autonomous actions.
- * Runs on Vercel Cron (configured in vercel.json).
+ * Runs via GitHub Actions (not Vercel cron).
  */
 export async function GET(req) {
+  // Idempotency guard — skip if last run was < 5 minutes ago
+  const { data: lastRun } = await supabase
+    .from('working_memory')
+    .select('value')
+    .eq('key', 'proactive_last_run')
+    .maybeSingle();
+  if (lastRun?.value) {
+    const elapsed = Date.now() - new Date(lastRun.value).getTime();
+    if (elapsed < 5 * 60 * 1000) {
+      return NextResponse.json({ success: true, skipped: true, reason: 'Ran within last 5 minutes' });
+    }
+  }
+  await supabase.from('working_memory').upsert(
+    { key: 'proactive_last_run', value: new Date().toISOString() },
+    { onConflict: 'key' }
+  );
+
   try {
     // 1. Resolve IST Time
     const now = new Date();
@@ -31,6 +48,9 @@ export async function GET(req) {
       emailDigest: false,
       remindersAndTasks: null,
       memoryPruned: false,
+      repeatingReminders: 0,
+      idleProjects: 0,
+      focusExpired: false,
     };
 
     // 2. Schedule Specific Routines
@@ -52,6 +72,11 @@ export async function GET(req) {
       results.weeklyReview = true;
     }
 
+    // Monthly Goal Progress (1st of month, 09:00 IST)
+    if (istDate.getDate() === 1 && hour === 9 && minute < 15) {
+      await triggerMonthlyGoalProgress();
+    }
+
     // 3. Constant Background Routines
     // - Every hour: Email Action-Item Digest
     if (minute < 10) {
@@ -62,8 +87,26 @@ export async function GET(req) {
     // - Every run: Check due reminders and escalations
     results.remindersAndTasks = await checkRemindersAndTasks();
 
+    // - Every run: Process repeating reminders
+    results.repeatingReminders = await processRepeatingReminders();
+
     // - Every run: Consolidate/Prune episodic memory
     results.memoryPruned = await pruneEpisodicMemory();
+
+    // - Every run: Check focus mode expiry
+    results.focusExpired = await checkFocusExpiry();
+
+    // - Hourly: Check idle projects
+    if (minute < 10) {
+      results.idleProjects = await checkIdleProjects();
+    }
+
+    // - Every run: Store notification for proactive messages
+    await supabase.from('notifications').insert({
+      type: 'proactive',
+      title: 'Proactive tick',
+      content: `Ran at ${istTime}. Reminders fired: ${results.remindersAndTasks || 0}`,
+    }).then(({ error }) => { if (error) console.error('[Proactive] Notification insert error:', error.message); });
 
     return NextResponse.json({
       success: true,
@@ -129,7 +172,49 @@ async function triggerEveningCheckin() {
 }
 
 async function triggerWeeklyReview() {
-  await sendMessage(CHAT_ID, `📊 *Weekly Review Ready.*\n\nYou've closed 0 tasks this week. Let's review the upcoming week.`);
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  const [completedRes, createdRes, patternsRes, moodRes] = await Promise.all([
+    supabase.from('tasks').select('title').eq('status', 'done').gte('updated_at', weekAgo),
+    supabase.from('tasks').select('title').gte('created_at', weekAgo),
+    supabase.from('patterns').select('observation, confidence').gte('created_at', weekAgo).order('created_at', { ascending: false }).limit(5),
+    supabase.from('mood_log').select('mood, intensity').gte('created_at', weekAgo),
+  ]);
+
+  const completed = completedRes.data || [];
+  const created = createdRes.data || [];
+  const patterns = patternsRes.data || [];
+  const moods = moodRes.data || [];
+
+  const completedTitles = completed.map(t => `→ ${t.title}`).join('\n') || '(none)';
+  const patternList = patterns.map(p => `→ ${p.observation}`).join('\n') || '(none detected)';
+  const moodSummary = moods.length > 0
+    ? `${moods.filter(m => m.mood === 'positive').length} positive, ${moods.filter(m => m.mood === 'stressed' || m.mood === 'frustrated').length} stressed`
+    : 'No mood data';
+
+  const momentum = completed.length > 0
+    ? Math.round((completed.length / (completed.length + (created.length - completed.length))) * 100)
+    : 0;
+
+  const message = `📊 *Weekly Review*\n\n` +
+    `*Tasks Completed:* ${completed.length}\n${completedTitles}\n\n` +
+    `*Tasks Created:* ${created.length}\n` +
+    `*Momentum Score:* ${momentum}%\n` +
+    `*Mood This Week:* ${moodSummary}\n\n` +
+    `*Patterns Detected:*\n${patternList}\n\n` +
+    `_What should we focus on next week?_`;
+
+  await sendMessage(CHAT_ID, message);
+
+  // Save to weekly_reviews table
+  const { error } = await supabase.from('weekly_reviews').insert({
+    tasks_completed: completed.length,
+    tasks_created: created.length,
+    momentum_score: momentum,
+    patterns_summary: patternList,
+    mood_summary: moodSummary,
+  });
+  if (error) console.error('[Proactive] weekly_reviews insert error:', error.message);
 }
 
 async function triggerEmailDigest() {
@@ -161,8 +246,17 @@ async function checkRemindersAndTasks() {
 
   for (const t of (openTasks || [])) {
     if (shouldNotifyTask(t, now)) {
-      const followUp = getFollowUpQuestion(t.tier);
-      await sendMessage(CHAT_ID, `📋 *TASK FOLLOW-UP (Tier ${t.tier})*\n\n*${t.title}*\n\n_${followUp}_`);
+      const followUp = getFollowUpQuestionEnhanced(t.tier, t.follow_up_count || 0);
+      await sendMessage(CHAT_ID, `📋 *TASK FOLLOW-UP (Tier ${t.tier})*\n\n*${t.title}*\n\n_${followUp}_`, {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '✅ Done', callback_data: `task_done:${t.id}` },
+            { text: '⏳ 1h', callback_data: `task_snooze:${t.id}:1` },
+            { text: '⏳ 3h', callback_data: `task_snooze:${t.id}:3` },
+            { text: '📅 Tomorrow', callback_data: `task_snooze:${t.id}:24` },
+          ]]
+        }
+      });
       await supabase.from('tasks').update({
         last_notified_at: now.toISOString(),
         follow_up_count: (t.follow_up_count || 0) + 1,
@@ -250,4 +344,154 @@ function shouldNotifyTask(task, now) {
   if (task.tier === 2 && hoursSince >= 12) return true;
   if (task.tier === 3 && hoursSince >= 24) return true;
   return false;
+}
+
+// ─── New Proactive Features ─────────────────────────────────────────────────
+
+/**
+ * Process repeating reminders — when a repeating reminder fires,
+ * create the next occurrence based on repeat_interval.
+ */
+async function processRepeatingReminders() {
+  const { data: firedRepeating, error } = await supabase
+    .from('reminders')
+    .select('*')
+    .eq('fired', true)
+    .not('repeat_interval', 'is', null);
+
+  if (error || !firedRepeating?.length) return 0;
+  let created = 0;
+
+  for (const r of firedRepeating) {
+    const lastTrigger = new Date(r.trigger_at);
+    let nextTrigger;
+
+    switch (r.repeat_interval) {
+      case 'daily':
+        nextTrigger = new Date(lastTrigger.getTime() + 24 * 60 * 60 * 1000);
+        break;
+      case 'weekly':
+        nextTrigger = new Date(lastTrigger.getTime() + 7 * 24 * 60 * 60 * 1000);
+        break;
+      case 'monthly':
+        nextTrigger = new Date(lastTrigger);
+        nextTrigger.setMonth(nextTrigger.getMonth() + 1);
+        break;
+      default:
+        continue;
+    }
+
+    const { error: insertErr } = await supabase.from('reminders').insert({
+      message: r.message,
+      trigger_at: nextTrigger.toISOString(),
+      tier: r.tier,
+      tier_reason: `Repeating (${r.repeat_interval})`,
+      fired: false,
+      repeat_interval: r.repeat_interval,
+      repeat_cron: r.repeat_cron,
+    });
+    if (!insertErr) {
+      created++;
+      // Clear repeat_interval from the fired copy so it doesn't regenerate again
+      await supabase.from('reminders').update({ repeat_interval: null }).eq('id', r.id);
+    }
+  }
+  return created;
+}
+
+/**
+ * Check if focus mode has expired and notify user.
+ */
+async function checkFocusExpiry() {
+  const { data: focus } = await supabase
+    .from('working_memory')
+    .select('value')
+    .eq('key', 'focus_mode')
+    .maybeSingle();
+
+  if (!focus?.value) return false;
+  const expiresAt = new Date(focus.value);
+  if (expiresAt > new Date()) return false;
+
+  await supabase.from('working_memory').delete().eq('key', 'focus_mode');
+  await sendMessage(CHAT_ID, '🎯 *Focus mode ended.* How did the session go?');
+  return true;
+}
+
+/**
+ * Check for projects with no task activity in 14+ days.
+ */
+async function checkIdleProjects() {
+  const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data: projects } = await supabase
+    .from('projects')
+    .select('id, title')
+    .eq('status', 'active');
+
+  if (!projects?.length) return 0;
+
+  let idle = 0;
+  for (const project of projects) {
+    const { data: recentTasks } = await supabase
+      .from('tasks')
+      .select('id')
+      .eq('project_id', project.id)
+      .gte('updated_at', twoWeeksAgo)
+      .limit(1);
+
+    if (!recentTasks?.length) {
+      idle++;
+      await sendMessage(CHAT_ID, `💤 *Idle Project Detected:* "${project.title}" has had no activity in 2+ weeks. Still active?`, {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '✅ Still active', callback_data: `brief_ack` },
+            { text: '📦 Archive it', callback_data: `task_done:${project.id}` },
+          ]]
+        }
+      });
+    }
+  }
+  return idle;
+}
+
+/**
+ * Monthly goal progress report — runs on the 1st.
+ */
+async function triggerMonthlyGoalProgress() {
+  const { data: goals } = await supabase
+    .from('goals')
+    .select('id, title, progress, target_date')
+    .eq('status', 'active');
+
+  if (!goals?.length) return;
+
+  let msg = '📈 *Monthly Goal Progress*\n\n';
+  for (const g of goals) {
+    const bar = '█'.repeat(Math.round(g.progress / 10)) + '░'.repeat(10 - Math.round(g.progress / 10));
+    msg += `→ *${g.title}* [${bar}] ${g.progress}%`;
+    if (g.target_date) msg += ` _(target: ${new Date(g.target_date).toLocaleDateString()})_`;
+    msg += '\n';
+  }
+  msg += '\n_Review your goals and adjust targets if needed._';
+
+  await sendMessage(CHAT_ID, msg);
+}
+
+/**
+ * Enhanced task follow-up — use psychologically aware messages for repeatedly snoozed tasks.
+ */
+function getFollowUpQuestionEnhanced(tier, followUpCount) {
+  if (followUpCount >= 4) {
+    return "You've avoided this multiple times now. What's the real blocker? Let's figure out the next tiny step together.";
+  }
+  if (followUpCount >= 3) {
+    return "This keeps getting pushed. What's actually blocking you? Is it too big? Let me help break it down.";
+  }
+  switch (tier) {
+    case 1: return "This is your top priority. Status?";
+    case 2: return "Checking in on this. Any progress?";
+    case 3: return "Is this still on your radar?";
+    default: return "Any updates?";
+  }
 }
