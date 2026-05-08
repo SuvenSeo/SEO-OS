@@ -40,16 +40,24 @@ export default function Dashboard() {
     loadDashboard();
 
     // Subscribe to realtime changes for all critical tables
-    const channel = supabase
-      .channel('dashboard-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, () => loadDashboard())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'reminders' }, () => loadDashboard())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'ideas' }, () => loadDashboard())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'patterns' }, () => loadDashboard())
-      .subscribe();
+    // Wrapped in try-catch: SUPABASE_URL/KEY are server-only vars, not available client-side
+    let channel;
+    try {
+      channel = supabase
+        .channel('dashboard-realtime')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, () => loadDashboard())
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'reminders' }, () => loadDashboard())
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'ideas' }, () => loadDashboard())
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'patterns' }, () => loadDashboard())
+        .subscribe();
+    } catch (e) {
+      console.warn('[Dashboard] Realtime subscription unavailable:', e.message);
+    }
 
     return () => {
-      supabase.removeChannel(channel);
+      if (channel) {
+        try { supabase.removeChannel(channel); } catch (_) {}
+      }
     };
   }, []);
 
