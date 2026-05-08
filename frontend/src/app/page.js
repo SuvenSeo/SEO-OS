@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '@/lib/api';
+import supabase from '@/lib/config/supabase';
 import { formatRelative } from '@/lib/utils';
 import SpotlightCard from '@/components/ui/SpotlightCard';
 import { 
@@ -37,6 +38,19 @@ export default function Dashboard() {
 
   useEffect(() => {
     loadDashboard();
+
+    // Subscribe to realtime changes for all critical tables
+    const channel = supabase
+      .channel('dashboard-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, () => loadDashboard())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'reminders' }, () => loadDashboard())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ideas' }, () => loadDashboard())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'patterns' }, () => loadDashboard())
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   async function loadDashboard() {
