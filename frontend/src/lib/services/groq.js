@@ -92,6 +92,31 @@ async function generateWithGemini(systemPrompt, messages, temperature = 0.7) {
                     required: ['messageId'],
                   },
                 },
+                {
+                  name: 'set_reminder',
+                  description: 'Set a personal reminder for Suven at a specific time.',
+                  parameters: {
+                    type: 'object',
+                    properties: {
+                      message: { type: 'string', description: 'The reminder message' },
+                      triggerAt: { type: 'string', description: 'ISO timestamp for when to trigger the reminder (Colombo time is UTC+5:30)' },
+                    },
+                    required: ['message', 'triggerAt'],
+                  },
+                },
+                {
+                  name: 'add_task',
+                  description: 'Add a new task to Suvens to-do list.',
+                  parameters: {
+                    type: 'object',
+                    properties: {
+                      title: { type: 'string', description: 'The task title' },
+                      priority: { type: 'number', description: 'Priority 1 (high) to 4 (low)' },
+                      deadline: { type: 'string', description: 'Optional ISO timestamp for deadline' },
+                    },
+                    required: ['title', 'priority'],
+                  },
+                },
               ]
             }],
             generationConfig: { temperature, maxOutputTokens: 2048 },
@@ -154,7 +179,7 @@ function classifyModelRoute(messages = []) {
   const codeHints = ['code', 'bug', 'debug', 'stack trace', 'api route', 'function', 'typescript', 'javascript', 'sql', 'regex', 'refactor'];
   const deepHints = ['strategy', 'roadmap', 'tradeoff', 'analyze', 'architecture', 'plan', 'compare'];
 
-  const toolHints = ['gmail', 'email', 'search', 'check', 'research', 'find', 'lookup', 'unread'];
+  const toolHints = ['gmail', 'email', 'search', 'check', 'research', 'find', 'lookup', 'unread', 'remind', 'task', 'reminder'];
 
   if (creativeHints.some(h => text.includes(h))) {
     return { type: 'creative', model: null };
@@ -207,6 +232,37 @@ const TOOLS = [
           messageId: { type: 'string', description: 'The unique Gmail message ID' },
         },
         required: ['messageId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'set_reminder',
+      description: 'Set a personal reminder for Suven at a specific time.',
+      parameters: {
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'The reminder message' },
+          triggerAt: { type: 'string', description: 'ISO timestamp for when to trigger the reminder' },
+        },
+        required: ['message', 'triggerAt'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'add_task',
+      description: 'Add a new task to Suvens to-do list.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'The task title' },
+          priority: { type: 'number', description: 'Priority 1 (high) to 4 (low)' },
+          deadline: { type: 'string', description: 'Optional ISO timestamp for deadline' },
+        },
+        required: ['title', 'priority'],
       },
     },
   },

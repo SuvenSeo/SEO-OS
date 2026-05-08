@@ -918,6 +918,22 @@ async function handleMessage(chatId, text, messageId) {
         result = await listMessages(args.query);
       } else if (name === 'read_gmail_content') {
         result = await getMessageContent(args.messageId);
+      } else if (name === 'set_reminder') {
+        const { error } = await supabase.from('reminders').insert({
+          message: args.message,
+          trigger_at: args.triggerAt,
+          tier: 2,
+          fired: false
+        });
+        result = error ? `Error: ${error.message}` : `Reminder set for ${args.triggerAt}`;
+      } else if (name === 'add_task') {
+        const { error } = await supabase.from('tasks').insert({
+          title: args.title,
+          priority: args.priority || 3,
+          deadline: args.deadline || null,
+          status: 'open'
+        });
+        result = error ? `Error: ${error.message}` : `Task "${args.title}" added successfully.`;
       } else {
         result = 'Unknown tool: ' + name;
       }
