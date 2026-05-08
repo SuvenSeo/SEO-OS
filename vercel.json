@@ -1,10 +1,4 @@
 {
   "framework": "nextjs",
-  "rootDirectory": "frontend",
-  "experimentalServices": {
-    "backend": {
-      "entrypoint": "backend",
-      "routePrefix": "/"
-    }
-  }
+  "rootDirectory": "frontend"
 }
