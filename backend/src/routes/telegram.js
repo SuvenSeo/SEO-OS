@@ -73,6 +73,8 @@ async function handleMessage(chatId, text, messageId) {
     .map(m => {
       const msg = { role: m.role, content: m.content };
       if (m.tool_calls) msg.tool_calls = m.tool_calls;
+      if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+      if (m.name) msg.name = m.name;
       return msg;
     });
 
@@ -94,7 +96,14 @@ async function handleMessage(chatId, text, messageId) {
     // Add assistant's message to local loop history
     messages.push(message);
 
-    // If no tool calls, this is the final answer
+    // 5. Save assistant's message (including tool_calls) to episodic memory
+    await supabase.from('episodic_memory').insert({
+      role: 'assistant',
+      content: message.content || '',
+      tool_calls: message.tool_calls || null,
+    });
+
+    // If no tool calls, this was the final answer
     if (!message.tool_calls || message.tool_calls.length === 0) {
       finalResponse = message.content;
       break;
@@ -109,8 +118,6 @@ async function handleMessage(chatId, text, messageId) {
       console.log(`[Telegram] Executing tool: ${name}`, args);
 
       if (name === 'web_search') {
-        // Notify user about search
-        // await sendMessage(chatId, `🔍 Searching: ${args.query}...`);
         result = await searchWeb(args.query);
       } else if (name === 'list_gmail') {
         result = await listMessages(args.query);
@@ -120,30 +127,24 @@ async function handleMessage(chatId, text, messageId) {
         result = 'Unknown tool: ' + name;
       }
 
-      // Add tool result to history
-      messages.push({
+      // Add tool result to local history
+      const toolResultMessage = {
         role: 'tool',
         tool_call_id: toolCall.id,
         name: name,
         content: result,
-      });
-    }
+      };
+      messages.push(toolResultMessage);
 
-    // Loop continues to let AI see tool results and decide next step
+      // Save tool result to episodic memory
+      await supabase.from('episodic_memory').insert(toolResultMessage);
+    }
   }
 
-  // 5. Save AI final response to episodic memory
+  // 6. Post-process
   if (finalResponse) {
-    await supabase.from('episodic_memory').insert({
-      role: 'assistant',
-      content: finalResponse,
-    });
-
-    // 6. Post-process
     const summary = await processExchange(text, finalResponse);
     const summaryText = formatSummary(summary);
-
-    // 7. Send final response
     await sendMessage(chatId, finalResponse + summaryText);
   }
 }
