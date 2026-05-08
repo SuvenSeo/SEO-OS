@@ -167,15 +167,13 @@ async function checkRemindersAndTasks() {
   const wakingEnd = cfg['waking_hours_end'] ?? 22;
   const isWaking = istHour >= wakingStart && istHour <= wakingEnd;
 
-  if (!isWaking) return { fired: 0, skipped: 'outside waking hours' };
-
   // 1. Morning brief nudge
   const { data: wmRows } = await supabase.from('working_memory')
     .select('key, value').in('key', ['morning_brief_replied', 'morning_brief_nudge_at'])
     .or(`expires_at.is.null,expires_at.gt.${now.toISOString()}`);
 
   const wm = Object.fromEntries((wmRows || []).map(r => [r.key, r.value]));
-  if (wm['morning_brief_nudge_at'] && new Date(wm['morning_brief_nudge_at']) <= now && wm['morning_brief_replied'] !== 'true') {
+  if (isWaking && wm['morning_brief_nudge_at'] && new Date(wm['morning_brief_nudge_at']) <= now && wm['morning_brief_replied'] !== 'true') {
     await sendMessage(CHAT_ID, `👋 You haven't responded to the morning brief yet, Suven. What's the plan today?`);
     await supabase.from('working_memory').delete().eq('key', 'morning_brief_nudge_at');
     fired++;
@@ -233,38 +231,42 @@ async function checkRemindersAndTasks() {
 
   // 4. Accountability — overdue tasks with escalating tone
   const { data: overdue } = await supabase.from('tasks').select('*')
-    .eq('status', 'open').not('deadline', 'is', null).lte('deadline', now.toISOString());
+      .eq('status', 'open').not('deadline', 'is', null).lte('deadline', now.toISOString());
 
-  for (const t of (overdue || [])) {
-    if (isMetaAutoTask(t)) continue;
-    const daysLate = Math.ceil((now - new Date(t.deadline)) / (1000 * 60 * 60 * 24));
-    const followUps = (t.follow_up_count || 0);
+  if (isWaking) {
+    for (const t of (overdue || [])) {
+      if (isMetaAutoTask(t)) continue;
+      const daysLate = Math.ceil((now - new Date(t.deadline)) / (1000 * 60 * 60 * 24));
+      const followUps = (t.follow_up_count || 0);
 
-    // Only escalate every 4+ hours
-    const lastNotified = t.last_notified_at ? new Date(t.last_notified_at) : new Date(t.created_at);
-    if ((now - lastNotified) < 4 * 60 * 60 * 1000) continue;
+      // Only escalate every 4+ hours
+      const lastNotified = t.last_notified_at ? new Date(t.last_notified_at) : new Date(t.created_at);
+      if ((now - lastNotified) < 4 * 60 * 60 * 1000) continue;
 
-    let tone = followUps < 2
-      ? `Task "${t.title}" is ${daysLate}d overdue. Status?`
-      : `You've avoided "${t.title}" for ${daysLate} days (${followUps}x followed up). What's actually blocking this?`;
+      let tone = followUps < 2
+        ? `Task "${t.title}" is ${daysLate}d overdue. Status?`
+        : `You've avoided "${t.title}" for ${daysLate} days (${followUps}x followed up). What's actually blocking this?`;
 
-    await sendMessage(CHAT_ID, `⚠️ *ACCOUNTABILITY*\n\n${tone}`, {
-      reply_markup: buildTaskActionKeyboard(t.id),
-    });
-    await supabase.from('tasks').update({
-      follow_up_count: followUps + 1,
-      last_notified_at: now.toISOString(),
-    }).eq('id', t.id);
-    fired++;
+      await sendMessage(CHAT_ID, `⚠️ *ACCOUNTABILITY*\n\n${tone}`, {
+        reply_markup: buildTaskActionKeyboard(t.id),
+      });
+      await supabase.from('tasks').update({
+        follow_up_count: followUps + 1,
+        last_notified_at: now.toISOString(),
+      }).eq('id', t.id);
+      fired++;
+    }
   }
 
   // 5. Proactive insight engine (deadline clusters + overcommit detection)
-  fired += await maybeSendProactiveInsights(now, actionableOpenTasks);
+  if (isWaking) {
+    fired += await maybeSendProactiveInsights(now, actionableOpenTasks);
+  }
 
   // 6. Idle-session consolidation (2h+ inactivity)
   fired += await maybeSummarizeIdleConversation(now);
 
-  return { fired };
+  return { fired, taskFollowupsSkipped: isWaking ? 0 : actionableOpenTasks.length };
 }
 
 // ─── Weekly Review ──────────────────────────────────────────────────────────

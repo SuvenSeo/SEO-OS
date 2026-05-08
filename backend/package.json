@@ -9,11 +9,16 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.0",
+    "@tavily/core": "^0.7.3",
+    "axios": "^1.16.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.0",
+    "googleapis": "^171.4.0",
     "groq-sdk": "^0.9.0",
-    "node-fetch": "^3.3.2"
+    "mammoth": "^1.12.0",
+    "node-fetch": "^3.3.2",
+    "pdf-parse": "^2.4.5"
   },
   "engines": {
     "node": ">=20.0.0"

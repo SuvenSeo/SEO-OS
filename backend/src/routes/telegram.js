@@ -5,6 +5,8 @@ const { generateResponse } = require('../services/groq');
 const { sendMessage } = require('../services/telegram');
 const { getFullPrompt } = require('../services/context');
 const { processExchange, formatSummary } = require('../services/postProcessor');
+const { searchWeb } = require('../services/search');
+const { listMessages, getMessageContent } = require('../services/gmail');
 
 // ── Webhook Handler ────────────────────────────────────────
 // POST /api/telegram/webhook
@@ -51,7 +53,7 @@ async function handleMessage(chatId, text, messageId) {
     telegram_message_id: messageId,
   });
 
-  // 2. Mark morning brief as replied (suppresses the 60-min nudge)
+  // 2. Mark morning brief as replied
   const istHour = new Date().toLocaleString('en-US', { timeZone: 'Asia/Colombo', hour: 'numeric', hour12: false });
   const hour = parseInt(istHour, 10);
   if (hour >= 8 && hour < 11) {
@@ -61,35 +63,84 @@ async function handleMessage(chatId, text, messageId) {
     );
   }
 
-  // 3. Build full context + system prompt — pass user message for knowledge_base search
-  const systemPrompt = await getFullPrompt(text);
-
-  // 4. Get recent conversation for message array
+  // 3. Get recent conversation history
   const { data: recentMessages } = await supabase
     .from('episodic_memory')
     .select('role, content')
     .order('created_at', { ascending: false })
     .limit(10);
 
-  const messages = (recentMessages || [])
+  let messages = (recentMessages || [])
     .reverse()
     .map(m => ({ role: m.role, content: m.content }));
 
-  // 5. Call Groq
-  const aiResponse = await generateResponse(systemPrompt, messages);
+  // 4. Start Tool Loop
+  let finalResponse = '';
+  let maxToolIterations = 5;
+  let iteration = 0;
 
-  // 6. Save AI response to episodic memory
-  await supabase.from('episodic_memory').insert({
-    role: 'assistant',
-    content: aiResponse,
-  });
+  while (iteration < maxToolIterations) {
+    iteration++;
+    
+    const systemPrompt = await getFullPrompt(text);
+    const choice = await generateResponse(systemPrompt, messages);
+    const { message } = choice;
 
-  // 7. Post-process: detect tasks, reminders, ideas, memory updates, snooze
-  const summary = await processExchange(text, aiResponse);
-  const summaryText = formatSummary(summary);
+    // If no tool calls, this is our final answer
+    if (!message.tool_calls || message.tool_calls.length === 0) {
+      finalResponse = message.content;
+      break;
+    }
 
-  // 8. Send response via Telegram
-  await sendMessage(chatId, aiResponse + summaryText);
+    // Add assistant's tool-call message to history
+    messages.push(message);
+
+    // Process each tool call
+    for (const toolCall of message.tool_calls) {
+      const { name, arguments: argsString } = toolCall.function;
+      const args = JSON.parse(argsString);
+      let result = '';
+
+      console.log(`[Telegram] Executing tool: ${name}`, args);
+
+      if (name === 'web_search') {
+        // Notify user about search
+        // await sendMessage(chatId, `🔍 Searching: ${args.query}...`);
+        result = await searchWeb(args.query);
+      } else if (name === 'list_gmail') {
+        result = await listMessages(args.query);
+      } else if (name === 'read_gmail_content') {
+        result = await getMessageContent(args.messageId);
+      } else {
+        result = 'Unknown tool: ' + name;
+      }
+
+      // Add tool result to history
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        name: name,
+        content: result,
+      });
+    }
+
+    // Loop continues to let AI see tool results and decide next step
+  }
+
+  // 5. Save AI final response to episodic memory
+  if (finalResponse) {
+    await supabase.from('episodic_memory').insert({
+      role: 'assistant',
+      content: finalResponse,
+    });
+
+    // 6. Post-process
+    const summary = await processExchange(text, finalResponse);
+    const summaryText = formatSummary(summary);
+
+    // 7. Send final response
+    await sendMessage(chatId, finalResponse + summaryText);
+  }
 }
 
 // ── Command Handler ────────────────────────────────────────

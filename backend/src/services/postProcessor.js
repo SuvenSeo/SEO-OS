@@ -3,15 +3,10 @@ const { generateStructuredExtraction } = require('./groq');
 
 /**
  * Post-process an AI conversation exchange.
- * Detects tasks, reminders, ideas, and memory updates.
- * Auto-inserts detected items into the database.
- * 
- * @param {string} userMessage - What the user said
- * @param {string} aiResponse - What the AI responded
- * @returns {Promise<object>} Summary of what was detected and created
+ * Detects tasks, reminders, ideas, memory updates, and behavioral patterns.
  */
 async function processExchange(userMessage, aiResponse) {
-  const extractionPrompt = `Analyze this conversation exchange and extract any actionable items.
+  const extractionPrompt = `Analyze this conversation exchange and extract any actionable items, insights, or patterns.
 
 USER MESSAGE: "${userMessage}"
 
@@ -26,75 +21,72 @@ Extract the following as JSON:
       "deadline": "ISO date string or null",
       "priority": 3,
       "tier": 1|2|3|4,
-      "tier_reason": "one line reason for this tier"
+      "tier_reason": "one line reason"
     }
   ],
+  "completed_tasks": [],
   "reminders": [
     {
       "message": "reminder text",
       "trigger_at": "ISO date string",
       "tier": 1|2|3,
-      "tier_reason": "one line reason for this tier"
+      "tier_reason": "reason"
     }
   ],
+  "deleted_reminders": [],
   "ideas": [
-    {
-      "content": "the idea"
-    }
+    { "content": "the idea" }
   ],
   "memory_updates": [
-    {
-      "key": "memory key",
-      "value": "memory value",
-      "type": "core|working"
-    }
+    { "key": "key", "value": "value", "type": "core|working" }
   ],
+  "deleted_memory": [],
   "snooze_requests": [
+    { "target": "desc", "snooze_until": "ISO", "duration_description": "2h" }
+  ],
+  "patterns": [
     {
-      "target": "what task or reminder to snooze (brief description)",
-      "snooze_until": "ISO date string for when to re-surface it",
-      "duration_description": "e.g. '2 hours', 'tomorrow morning'"
+      "observation": "detailed observation of a habit, pattern, or connection",
+      "confidence": "high|medium|low",
+      "category": "productivity|work|personal|uni"
     }
   ]
 }
 
-Urgency Tier Classification (USE YOUR JUDGMENT):
-- Tier 1 (Critical): Time-locked today/tomorrow. Urgent, specific time mentioned, or high-stakes (exams, meetings, strict deadlines).
-- Tier 2 (Important): Day-level task. Important work/uni projects that need focus today but lack a specific hour-lock.
-- Tier 3 (General): Vague or future-dated tasks. Things for "tomorrow", "this week", or general "to-do" items.
-- Tier 4 (Soft): No real deadline. Exploration, "someday", "maybe", "could be cool". (Classify these as ideas).
+Rules for Patterns:
+- Look for behavioral loops (e.g., procrastination triggers).
+- Look for project connections (e.g., Ardeno design for FullTank).
+- Only extract if evidenced in this specific exchange.
 
-Rules:
-- Do NOT use keyword matching. Use the meaning and context of the conversation to decide the tier.
-- Provide a concise "tier_reason" for every task and reminder explaining your classification.
-- Only extract items that were explicitly mentioned or clearly implied.
-- For tasks: look for action items, things to do, commitments made.
-- For reminders: look for specific times mentioned ("remind me at...", "tomorrow at...").
-- For ideas: look for brainstorming, "what if", project ideas, things to explore.
-- For memory updates: look for new facts about the user (preferences, decisions, updates).
-- Deadlines should be in ISO 8601 format. Use current date context: ${new Date().toISOString()}
-- If nothing was detected for a category, return an empty array.
-- Snooze detection: if the user says "remind me in X hours/days", "not now", "snooze", "later today", "tomorrow morning", "remind me again" — detect it as a snooze_request with snooze_until set to the appropriate future ISO time.
-
-Return ONLY valid JSON.`;
+Return ONLY valid JSON. Current Time: ${new Date().toISOString()}`;
 
   try {
     const raw = await generateStructuredExtraction(extractionPrompt);
     
-    // Parse the JSON response
     let extracted;
     try {
-      // Handle potential markdown code blocks in response
       const cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       extracted = JSON.parse(cleaned);
     } catch (parseError) {
       console.warn('[PostProcessor] Failed to parse extraction:', parseError.message);
-      return { tasks: 0, reminders: 0, ideas: 0, memory_updates: 0, snoozed: 0 };
+      return { tasks: 0, reminders: 0, ideas: 0, memory_updates: 0, snoozed: 0, patterns: 0 };
     }
 
-    const summary = { tasks: 0, reminders: 0, ideas: 0, memory_updates: 0, snoozed: 0 };
+    const summary = { tasks: 0, reminders: 0, ideas: 0, memory_updates: 0, snoozed: 0, patterns: 0 };
 
-    // Insert detected tasks
+    // 1. Insert Patterns
+    if (extracted.patterns && extracted.patterns.length > 0) {
+      for (const pattern of extracted.patterns) {
+        const { error } = await supabase.from('patterns').insert({
+          observation: pattern.observation,
+          confidence: pattern.confidence || 'medium',
+          category: pattern.category || 'general',
+        });
+        if (!error) summary.patterns++;
+      }
+    }
+
+    // 2. Insert Tasks
     if (extracted.tasks && extracted.tasks.length > 0) {
       for (const task of extracted.tasks) {
         const { error } = await supabase.from('tasks').insert({
@@ -111,7 +103,7 @@ Return ONLY valid JSON.`;
       }
     }
 
-    // Insert detected reminders
+    // 3. Insert Reminders
     if (extracted.reminders && extracted.reminders.length > 0) {
       for (const reminder of extracted.reminders) {
         if (!reminder.trigger_at) continue;
@@ -126,7 +118,7 @@ Return ONLY valid JSON.`;
       }
     }
 
-    // Insert detected ideas
+    // 4. Insert Ideas
     if (extracted.ideas && extracted.ideas.length > 0) {
       for (const idea of extracted.ideas) {
         const { error } = await supabase.from('ideas').insert({
@@ -137,63 +129,57 @@ Return ONLY valid JSON.`;
       }
     }
 
-    // Process memory updates
+    // 5. Memory Updates
     if (extracted.memory_updates && extracted.memory_updates.length > 0) {
       for (const mem of extracted.memory_updates) {
         if (mem.type === 'core') {
-          // Upsert core memory
-          const { error } = await supabase
-            .from('core_memory')
-            .upsert(
-              { key: mem.key, value: mem.value, updated_at: new Date().toISOString() },
-              { onConflict: 'key' }
-            );
-          if (!error) summary.memory_updates++;
-        } else if (mem.type === 'working') {
-          // Insert working memory (expires in 24h by default)
+          await supabase.from('core_memory').upsert({ key: mem.key, value: mem.value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+        } else {
           const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-          const { error } = await supabase.from('working_memory').insert({
-            key: mem.key,
-            value: mem.value,
-            expires_at: expiresAt,
-          });
-          if (!error) summary.memory_updates++;
+          await supabase.from('working_memory').insert({ key: mem.key, value: mem.value, expires_at: expiresAt });
         }
+        summary.memory_updates++;
       }
     }
 
-    // Handle snooze requests
+    // 6. Snooze
     if (extracted.snooze_requests && extracted.snooze_requests.length > 0) {
       for (const snooze of extracted.snooze_requests) {
         if (!snooze.snooze_until) continue;
-        const { error } = await supabase.from('reminders').insert({
+        await supabase.from('reminders').insert({
           message: `Snoozed: ${snooze.target}`,
           trigger_at: snooze.snooze_until,
           tier: 2,
-          tier_reason: `Snoozed by user — resurface ${snooze.duration_description}`,
+          tier_reason: `Snoozed by user`,
           fired: false,
         });
-        if (!error) summary.snoozed++;
+        summary.snoozed++;
+      }
+    }
+
+    // 7. Deletions/Completions (Simplified)
+    if (extracted.completed_tasks?.length > 0) {
+      const { data: openTasks } = await supabase.from('tasks').select('id, title').eq('status', 'open');
+      for (const doneTitle of extracted.completed_tasks) {
+        const match = openTasks?.find(t => t.title.toLowerCase().includes(doneTitle.toLowerCase()));
+        if (match) await supabase.from('tasks').update({ status: 'done' }).eq('id', match.id);
       }
     }
 
     return summary;
   } catch (error) {
     console.error('[PostProcessor] Error:', error.message);
-    return { tasks: 0, reminders: 0, ideas: 0, memory_updates: 0, snoozed: 0 };
+    return { tasks: 0, reminders: 0, ideas: 0, memory_updates: 0, snoozed: 0, patterns: 0 };
   }
 }
 
-/**
- * Format the post-processing summary for display.
- */
 function formatSummary(summary) {
   const parts = [];
   if (summary.tasks > 0) parts.push(`📋 ${summary.tasks} task(s) logged`);
   if (summary.reminders > 0) parts.push(`⏰ ${summary.reminders} reminder(s) set`);
-  if (summary.snoozed > 0) parts.push(`😴 ${summary.snoozed} snoozed`);
   if (summary.ideas > 0) parts.push(`💡 ${summary.ideas} idea(s) captured`);
-  if (summary.memory_updates > 0) parts.push(`🧠 ${summary.memory_updates} memory update(s)`);
+  if (summary.patterns > 0) parts.push(`🧠 ${summary.patterns} pattern(s) detected`);
+  if (summary.memory_updates > 0) parts.push(`🧬 Memory updated`);
 
   if (parts.length === 0) return '';
   return '\n\n_' + parts.join(' · ') + '_';

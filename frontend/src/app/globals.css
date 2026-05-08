@@ -1,57 +1,108 @@
 @import "tailwindcss";
 
 :root {
-  --bg-primary: #0a0a0a;
-  --bg-surface: #111111;
-  --bg-surface-hover: #161616;
-  --bg-elevated: #1a1a1a;
+  --bg-primary: #09090b;
+  --bg-surface: #121214;
+  --bg-surface-hover: #18181b;
+  --bg-elevated: #27272a;
   --accent: #E83518;
   --accent-hover: #ff4528;
-  --accent-muted: rgba(232, 53, 24, 0.15);
-  --text-primary: #ffffff;
+  --accent-muted: rgba(232, 53, 24, 0.1);
+  --text-primary: #fafafa;
   --text-secondary: #a1a1aa;
-  --text-muted: #71717a;
-  --border: rgba(255, 255, 255, 0.06);
-  --border-hover: rgba(255, 255, 255, 0.12);
-  --glass: rgba(255, 255, 255, 0.03);
-  --danger: #ef4444;
-  --success: #22c55e;
-  --warning: #f59e0b;
-  --info: #3b82f6;
+  --text-muted: #52525b;
+  --border: rgba(255, 255, 255, 0.05);
+  --border-hover: rgba(255, 255, 255, 0.1);
+  --glass: rgba(255, 255, 255, 0.02);
+  --selection-bg: var(--accent-muted);
 }
 
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--bg-elevated) transparent;
+  box-sizing: border-box;
+}
+
+::selection {
+  background: var(--selection-bg);
+  color: var(--accent);
 }
 
 body {
   background-color: var(--bg-primary);
   color: var(--text-primary);
   font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  letter-spacing: -0.01em;
+  line-height: 1.6;
 }
 
-/* Glassmorphism card */
+h1, h2, h3, h4 {
+  letter-spacing: -0.04em;
+  font-weight: 700;
+  color: #fff;
+}
+
+/* Glassmorphism Card (Pro Max) */
 .glass-card {
   background: var(--glass);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 20px;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .glass-card:hover {
   border-color: var(--border-hover);
+  background: rgba(255, 255, 255, 0.03);
+  transform: translateY(-2px);
 }
 
-/* Accent glow effect */
-.accent-glow {
-  box-shadow: 0 0 30px rgba(232, 53, 24, 0.1);
+/* Spotlight Effect */
+.spotlight {
+  position: absolute;
+  pointer-events: none;
+  background: radial-gradient(400px circle at var(--x) var(--y), rgba(255, 255, 255, 0.06), transparent 40%);
+  width: 100%;
+  height: 100%;
+  top: 0;
+  left: 0;
+  z-index: 1;
 }
 
-/* Scrollbar styling */
+/* Bento Grid Utilities */
+.bento-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-auto-rows: 180px;
+  gap: 1.5rem;
+}
+
+.bento-item {
+  grid-column: span 1;
+  grid-row: span 1;
+}
+
+.bento-item-large {
+  grid-column: span 2;
+  grid-row: span 2;
+}
+
+.bento-item-wide {
+  grid-column: span 2;
+  grid-row: span 1;
+}
+
+.bento-item-tall {
+  grid-column: span 1;
+  grid-row: span 2;
+}
+
+/* Custom Scrollbar */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 5px;
 }
 
 ::-webkit-scrollbar-track {
@@ -59,34 +110,25 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--bg-elevated);
-  border-radius: 3px;
+  background: #27272a;
+  border-radius: 10px;
 }
 
-/* Code/monospace */
-.font-mono {
-  font-family: var(--font-geist-mono), 'JetBrains Mono', monospace;
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
 }
 
-/* Pulse animation for status indicators */
-@keyframes pulse-accent {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+/* Priority UI */
+.priority-chip {
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
-.pulse-accent {
-  animation: pulse-accent 2s ease-in-out infinite;
-}
-
-/* Priority colors */
-.priority-1 { color: #ef4444; }
-.priority-2 { color: #f97316; }
-.priority-3 { color: #f59e0b; }
-.priority-4 { color: #3b82f6; }
-.priority-5 { color: #6b7280; }
-
-.priority-bg-1 { background: rgba(239, 68, 68, 0.15); }
-.priority-bg-2 { background: rgba(249, 115, 22, 0.15); }
-.priority-bg-3 { background: rgba(245, 158, 11, 0.15); }
-.priority-bg-4 { background: rgba(59, 130, 246, 0.15); }
-.priority-bg-5 { background: rgba(107, 114, 128, 0.15); }
+.priority-1 { background: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.2); }
+.priority-2 { background: rgba(249, 115, 22, 0.1); color: #f97316; border: 1px solid rgba(249, 115, 22, 0.2); }
+.priority-3 { background: rgba(245, 158, 11, 0.1); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.2); }
+.priority-4 { background: rgba(59, 130, 246, 0.1); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.2); }

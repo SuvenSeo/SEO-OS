@@ -126,7 +126,7 @@ export default function ConfigPage() {
     <div className="space-y-8">
       <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} transition={spring}>
         <h1 className="text-3xl font-bold tracking-[-0.04em]">Configuration</h1>
-        <p className="text-[var(--text-muted)] mt-1">Edit SEOS's brain directly</p>
+        <p className="text-[var(--text-muted)] mt-1">Edit SEOS&apos;s brain directly</p>
       </motion.div>
 
       {/* Pending Self-Audit */}
