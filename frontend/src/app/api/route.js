@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+// Force redeploy: 2026-05-08 13:31
 
 export async function GET() {
   const status = {
