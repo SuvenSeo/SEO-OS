@@ -1,9 +1,9 @@
 // Empty string is correct — Next.js API routes are same-origin, so relative paths work.
 const API_URL = '';
-// Server-side only token for API auth. Falls back to NEXT_PUBLIC_ for backwards compat.
+// Server-side uses CRON_SECRET, client-side uses NEXT_PUBLIC_CRON_SECRET.
 const TOKEN = typeof window === 'undefined'
   ? (process.env.CRON_SECRET || process.env.NEXT_PUBLIC_CRON_SECRET || '')
-  : '';
+  : (process.env.NEXT_PUBLIC_CRON_SECRET || '');
 
 async function request(path, options = {}) {
   const { method = 'GET', body, params } = options;
