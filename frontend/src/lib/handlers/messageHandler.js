@@ -492,10 +492,12 @@ export async function handleMessage(chatId, text, messageId) {
   const maxToolIterations = 5;
   let iteration = 0;
 
+  // Hoisted to prevent redundant DB queries during tool iterations
+  const systemPrompt = await getFullPrompt(processedText);
+
   while (iteration < maxToolIterations) {
     iteration++;
     
-    const systemPrompt = await getFullPrompt(processedText);
     const message = await generateResponse(systemPrompt, messages);
 
     messages.push(message);
