@@ -36,10 +36,12 @@ export async function POST(request) {
     const maxToolIterations = 5;
     let iteration = 0;
 
+    // Hoisted to prevent redundant DB queries during tool iterations
+    const systemPrompt = await getFullPrompt(message);
+
     while (iteration < maxToolIterations) {
       iteration++;
       
-      const systemPrompt = await getFullPrompt(message);
       const aiMessage = await generateResponse(systemPrompt, messages);
 
       // Add assistant's message to local loop history

@@ -234,17 +234,16 @@ async function buildContext(userMessage = '') {
   sections.push(`CURRENT DATE/TIME: ${now.toISOString()} (Sri Lanka: ${now.toLocaleString('en-US', { timeZone: 'Asia/Colombo' })})`);
 
   // Run all DB queries in parallel — cached where data rarely changes
-  const cachedCore    = getCache('core_memory');
+  const cachedCore     = getCache('core_memory');
   const cachedPatterns = getCache('patterns');
-  const cachedIdeas   = getCache('ideas');
+  const cachedIdeas    = getCache('ideas');
+  const cachedWorking  = getCache('working_memory');
 
   const promises = [
-    // Always fresh: episodic memory window for smart context selection
-    supabase.from('episodic_memory').select('role, content, created_at').order('created_at', { ascending: false }).limit(EPISODE_FETCH_LIMIT),
     // Always fresh: open tasks
     supabase.from('tasks').select('id, title, description, deadline, priority, status, follow_up_count, tier').in('status', ['open', 'snoozed']).order('priority', { ascending: true }),
     // Cached 1 min: working memory
-    supabase.from('working_memory').select('key, value, expires_at').or(`expires_at.is.null,expires_at.gt.${now.toISOString()}`),
+    cachedWorking ? Promise.resolve({ data: cachedWorking }) : supabase.from('working_memory').select('key, value, expires_at').or(`expires_at.is.null,expires_at.gt.${now.toISOString()}`),
     // Cached 5 min: core memory
     cachedCore    ? Promise.resolve({ data: cachedCore })    : supabase.from('core_memory').select('key, value').order('key'),
     // Cached 5 min: patterns
@@ -254,7 +253,6 @@ async function buildContext(userMessage = '') {
   ];
 
   const [
-    { data: episodes },
     { data: tasks },
     { data: workingMemory },
     { data: coreMemory },
@@ -262,12 +260,13 @@ async function buildContext(userMessage = '') {
     { data: ideas },
   ] = await Promise.all(promises);
 
-  // Update caches for slow-changing data
-  if (!cachedCore     && coreMemory)  setCache('core_memory', coreMemory,  TTL_5MIN);
-  if (!cachedPatterns && patterns)    setCache('patterns',    patterns,     TTL_5MIN);
-  if (!cachedIdeas    && ideas)       setCache('ideas',       ideas,        TTL_5MIN);
+  // Update caches for slow-changing or frequent data
+  if (!cachedWorking  && workingMemory) setCache('working_memory', workingMemory, TTL_1MIN);
+  if (!cachedCore     && coreMemory)    setCache('core_memory',    coreMemory,    TTL_5MIN);
+  if (!cachedPatterns && patterns)      setCache('patterns',       patterns,      TTL_5MIN);
+  if (!cachedIdeas    && ideas)         setCache('ideas',          ideas,         TTL_5MIN);
 
-  // (History is now handled via the messages array in the chat completion call to prevent redundancy)
+  // (Episodic memory fetch removed here as history is handled via the messages array in the chat completion call)
 
   if (!greetingOnly && tasks && tasks.length > 0) {
     const taskList = tasks.map(t => {
