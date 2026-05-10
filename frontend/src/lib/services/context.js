@@ -238,6 +238,22 @@ async function buildContext(userMessage = '') {
   const cachedPatterns = getCache('patterns');
   const cachedIdeas   = getCache('ideas');
 
+  // Early keyword extraction to parallelize knowledge retrieval
+  let knowledgePromise = Promise.resolve([]);
+  if (!greetingOnly && userMessage && userMessage.length > 3) {
+    const stopWords = new Set(['this', 'that', 'with', 'from', 'have', 'will', 'been', 'they', 'what', 'just', 'your', 'about']);
+    const keywords = userMessage
+      .toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 3 && !stopWords.has(w))
+      .slice(0, 8);
+
+    if (keywords.length > 0) {
+      knowledgePromise = fetchRelevantKnowledge(userMessage, keywords);
+    }
+  }
+
   const promises = [
     // Always fresh: episodic memory window for smart context selection
     supabase.from('episodic_memory').select('role, content, created_at').order('created_at', { ascending: false }).limit(EPISODE_FETCH_LIMIT),
@@ -251,6 +267,8 @@ async function buildContext(userMessage = '') {
     cachedPatterns ? Promise.resolve({ data: cachedPatterns }) : supabase.from('patterns').select('observation, confidence').order('created_at', { ascending: false }).limit(8),
     // Cached 5 min: raw ideas
     cachedIdeas   ? Promise.resolve({ data: cachedIdeas })   : supabase.from('ideas').select('content').eq('status', 'raw').order('created_at', { ascending: false }).limit(5),
+    // Run knowledge retrieval in parallel
+    knowledgePromise,
   ];
 
   const [
@@ -260,6 +278,7 @@ async function buildContext(userMessage = '') {
     { data: coreMemory },
     { data: patterns },
     { data: ideas },
+    knowledge,
   ] = await Promise.all(promises);
 
   // Update caches for slow-changing data
@@ -296,26 +315,12 @@ async function buildContext(userMessage = '') {
     sections.push(`RECENT RAW IDEAS:\n${ideas.map(i => `  - ${i.content}`).join('\n')}`);
   }
 
-  // RELEVANT KNOWLEDGE — Full-text search on knowledge_base using user's message
-  if (!greetingOnly && userMessage && userMessage.length > 3) {
-    const stopWords = new Set(['this', 'that', 'with', 'from', 'have', 'will', 'been', 'they', 'what', 'just', 'your', 'about']);
-    const keywords = userMessage
-      .toLowerCase()
-      .replace(/[^\w\s]/g, ' ')
-      .split(/\s+/)
-      .filter(w => w.length > 3 && !stopWords.has(w))
-      .slice(0, 8);
-
-    if (keywords.length > 0) {
-      const knowledge = await fetchRelevantKnowledge(userMessage, keywords);
-
-      if (knowledge.length > 0) {
-        const knowledgeStr = knowledge
-          .map(k => `  [${k.source}] ${k.content.substring(0, 300)}${k.content.length > 300 ? '...' : ''}`)
-          .join('\n\n');
-        sections.push(`RELEVANT KNOWLEDGE (from WhatsApp import and saved notes):\n${knowledgeStr}`);
-      }
-    }
+  // RELEVANT KNOWLEDGE (already fetched in parallel above)
+  if (knowledge && knowledge.length > 0) {
+    const knowledgeStr = knowledge
+      .map(k => `  [${k.source}] ${k.content.substring(0, 300)}${k.content.length > 300 ? '...' : ''}`)
+      .join('\n\n');
+    sections.push(`RELEVANT KNOWLEDGE (from WhatsApp import and saved notes):\n${knowledgeStr}`);
   }
 
   return sections.join('\n\n---\n\n');
