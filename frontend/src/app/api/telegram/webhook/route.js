@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 export const dynamic = 'force-dynamic';
 import supabase from '@/lib/config/supabase';
+import { requireAuth } from '@/lib/middleware/auth';
 import { sendMessage } from '@/lib/services/telegram';
 import { handleCommand } from '@/lib/handlers/commandHandler';
 import { handleMessage, hasProcessedTelegramMessage, markTelegramMessageProcessed } from '@/lib/handlers/messageHandler';
@@ -12,6 +13,12 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const action = searchParams.get('action');
+
+  // Protect sensitive actions
+  if (['setWebhook', 'updatePrompt', 'sendTest'].includes(action)) {
+    const authResponse = requireAuth(request);
+    if (authResponse) return authResponse;
+  }
 
   if (action === 'setWebhook') {
     const webhookUrl = `https://${request.headers.get('host')}/api/telegram/webhook`;
