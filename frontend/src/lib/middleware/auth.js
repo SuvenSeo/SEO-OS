@@ -11,8 +11,11 @@ export function requireAuth(request) {
   const secret = process.env.CRON_SECRET || process.env.NEXT_PUBLIC_CRON_SECRET || '';
 
   if (!secret) {
-    console.warn('[Auth] No CRON_SECRET configured — allowing request');
-    return null;
+    console.warn('[Auth] No CRON_SECRET or NEXT_PUBLIC_CRON_SECRET configured — denying request (fail-secure)');
+    return NextResponse.json(
+      { error: 'Unauthorized: Security secret not configured' },
+      { status: 401 }
+    );
   }
 
   if (token === secret) {
