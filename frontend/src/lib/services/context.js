@@ -83,6 +83,10 @@ ${candidateText}`);
 }
 
 async function fetchRelevantKnowledge(userMessage, keywords) {
+  const cacheKey = `knowledge:${userMessage}:${keywords.join(',')}`;
+  const cached = getCache(cacheKey);
+  if (cached) return cached;
+
   const ftsQuery = keywords.join(' | ');
   const baseQuery = supabase
     .from('knowledge_base')
@@ -94,7 +98,9 @@ async function fetchRelevantKnowledge(userMessage, keywords) {
     .textSearch('fts', ftsQuery, { type: 'plain', config: 'english' });
 
   if (!ftsError) {
-    return rerankKnowledgeSemantically(userMessage, ftsRows || []);
+    const result = await rerankKnowledgeSemantically(userMessage, ftsRows || []);
+    setCache(cacheKey, result, TTL_5MIN);
+    return result;
   }
 
   const message = (ftsError.message || '').toLowerCase();
@@ -125,7 +131,9 @@ async function fetchRelevantKnowledge(userMessage, keywords) {
     return [];
   }
 
-  return rerankKnowledgeSemantically(userMessage, fallbackRows || []);
+  const result = await rerankKnowledgeSemantically(userMessage, fallbackRows || []);
+  setCache(cacheKey, result, TTL_5MIN);
+  return result;
 }
 
 function compressVerboseContent(content = '') {
