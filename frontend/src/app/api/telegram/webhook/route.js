@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 export const dynamic = 'force-dynamic';
+import { requireAuth } from '@/lib/middleware/auth';
 import supabase from '@/lib/config/supabase';
 import { sendMessage } from '@/lib/services/telegram';
 import { handleCommand } from '@/lib/handlers/commandHandler';
@@ -10,6 +11,9 @@ const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOK
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 export async function GET(request) {
+  const authResponse = requireAuth(request);
+  if (authResponse) return authResponse;
+
   const { searchParams } = new URL(request.url);
   const action = searchParams.get('action');
 
