@@ -83,6 +83,11 @@ ${candidateText}`);
 }
 
 async function fetchRelevantKnowledge(userMessage, keywords) {
+  const normalizedMsg = userMessage.trim().toLowerCase().replace(/\s+/g, ' ');
+  const cacheKey = `knowledge:${normalizedMsg}:${[...keywords].sort().join(',')}`;
+  const cached = getCache(cacheKey);
+  if (cached) return cached;
+
   const ftsQuery = keywords.join(' | ');
   const baseQuery = supabase
     .from('knowledge_base')
@@ -94,7 +99,9 @@ async function fetchRelevantKnowledge(userMessage, keywords) {
     .textSearch('fts', ftsQuery, { type: 'plain', config: 'english' });
 
   if (!ftsError) {
-    return rerankKnowledgeSemantically(userMessage, ftsRows || []);
+    const final = await rerankKnowledgeSemantically(userMessage, ftsRows || []);
+    setCache(cacheKey, final, TTL_5MIN);
+    return final;
   }
 
   const message = (ftsError.message || '').toLowerCase();
@@ -125,7 +132,9 @@ async function fetchRelevantKnowledge(userMessage, keywords) {
     return [];
   }
 
-  return rerankKnowledgeSemantically(userMessage, fallbackRows || []);
+  const final = await rerankKnowledgeSemantically(userMessage, fallbackRows || []);
+  setCache(cacheKey, final, TTL_5MIN);
+  return final;
 }
 
 function compressVerboseContent(content = '') {
@@ -237,6 +246,7 @@ async function buildContext(userMessage = '') {
   const cachedCore    = getCache('core_memory');
   const cachedPatterns = getCache('patterns');
   const cachedIdeas   = getCache('ideas');
+  const cachedWorkingMemory = getCache('working_memory');
 
   const promises = [
     // Always fresh: episodic memory window for smart context selection
@@ -244,7 +254,7 @@ async function buildContext(userMessage = '') {
     // Always fresh: open tasks
     supabase.from('tasks').select('id, title, description, deadline, priority, status, follow_up_count, tier').in('status', ['open', 'snoozed']).order('priority', { ascending: true }),
     // Cached 1 min: working memory
-    supabase.from('working_memory').select('key, value, expires_at').or(`expires_at.is.null,expires_at.gt.${now.toISOString()}`),
+    cachedWorkingMemory ? Promise.resolve({ data: cachedWorkingMemory }) : supabase.from('working_memory').select('key, value, expires_at').or(`expires_at.is.null,expires_at.gt.${now.toISOString()}`),
     // Cached 5 min: core memory
     cachedCore    ? Promise.resolve({ data: cachedCore })    : supabase.from('core_memory').select('key, value').order('key'),
     // Cached 5 min: patterns
@@ -263,6 +273,7 @@ async function buildContext(userMessage = '') {
   ] = await Promise.all(promises);
 
   // Update caches for slow-changing data
+  if (!cachedWorkingMemory && workingMemory) setCache('working_memory', workingMemory, TTL_1MIN);
   if (!cachedCore     && coreMemory)  setCache('core_memory', coreMemory,  TTL_5MIN);
   if (!cachedPatterns && patterns)    setCache('patterns',    patterns,     TTL_5MIN);
   if (!cachedIdeas    && ideas)       setCache('ideas',       ideas,        TTL_5MIN);
