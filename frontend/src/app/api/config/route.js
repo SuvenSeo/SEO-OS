@@ -1,13 +1,20 @@
 import { NextResponse } from 'next/server';
+import { requireAuth } from '@/lib/middleware/auth';
 import supabase from '@/lib/config/supabase';
 
-export async function GET() {
+export async function GET(request) {
+  const authError = requireAuth(request);
+  if (authError) return authError;
+
   const { data, error } = await supabase.from('agent_config').select('*').order('key');
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ config: data });
 }
 
 export async function PUT(request) {
+  const authError = requireAuth(request);
+  if (authError) return authError;
+
   try {
     const { key, value } = await request.json();
     if (!key || value === undefined) {
