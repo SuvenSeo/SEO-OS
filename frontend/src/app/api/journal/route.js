@@ -1,7 +1,11 @@
 import { NextResponse } from 'next/server';
+import { requireAuth } from '@/lib/middleware/auth';
 import supabase from '@/lib/config/supabase';
 
 export async function GET(request) {
+  const authError = requireAuth(request);
+  if (authError) return authError;
+
   const { searchParams } = new URL(request.url);
   const type = searchParams.get('type');
   const limit = parseInt(searchParams.get('limit') || '50', 10);
@@ -15,6 +19,9 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
+  const authError = requireAuth(request);
+  if (authError) return authError;
+
   const body = await request.json();
   const { data, error } = await supabase.from('journal_entries').insert(body).select().single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

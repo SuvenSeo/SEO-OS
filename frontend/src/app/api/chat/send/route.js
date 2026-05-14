@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { requireAuth } from '@/lib/middleware/auth';
 import supabase from '@/lib/config/supabase';
 import { generateResponse } from '@/lib/services/groq';
 import { getFullPrompt } from '@/lib/services/context';
@@ -7,6 +8,9 @@ import { searchWeb } from '@/lib/services/search';
 import { listMessages, getMessageContent } from '@/lib/services/gmail';
 
 export async function POST(request) {
+  const authError = requireAuth(request);
+  if (authError) return authError;
+
   try {
     const { message } = await request.json();
     if (!message) return NextResponse.json({ error: 'message is required' }, { status: 400 });
