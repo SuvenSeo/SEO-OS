@@ -5,11 +5,15 @@ import { sendMessage } from '@/lib/services/telegram';
 import { handleCommand } from '@/lib/handlers/commandHandler';
 import { handleMessage, hasProcessedTelegramMessage, markTelegramMessageProcessed } from '@/lib/handlers/messageHandler';
 import { handlePhoto, handleDocument, handleVoice, handleForwarded } from '@/lib/handlers/fileHandler';
+import { requireAuth } from '@/lib/middleware/auth';
 
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 export async function GET(request) {
+  const authResponse = requireAuth(request);
+  if (authResponse) return authResponse;
+
   const { searchParams } = new URL(request.url);
   const action = searchParams.get('action');
 
