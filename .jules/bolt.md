@@ -1,0 +1,3 @@
+## 2025-05-15 - [Redundant Context Fetching & LLM Overhead]
+**Learning:** The `buildContext` service was performing an `episodic_memory` fetch that was redundant because chat history is already provided via the message array in the chat API. Additionally, semantic reranking of knowledge entries was being re-executed even for identical queries within the same tool loop, causing unnecessary LLM latency.
+**Action:** Always verify if history is already managed by the chat controller before fetching it in context services. Implement caching for expensive LLM-based reranking results using a normalized message + keyword composite key to optimize tool-heavy conversation turns.
