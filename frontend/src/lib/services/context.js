@@ -14,21 +14,7 @@ function setCache(key, val, ttlMs) {
 const TTL_5MIN  = 5  * 60 * 1000;
 const TTL_1MIN  = 1  * 60 * 1000;
 let hasWarnedMissingKnowledgeFts = false;
-const EPISODE_FETCH_LIMIT = 40;
-const BACKGROUND_EPISODE_LIMIT = 8;
-const SESSION_BREAK_MS = 90 * 60 * 1000;
-const CONTEXT_NOISE_PATTERNS = [
-  /^_?📋 \d+ task\(s\) logged/i,
-  /^_?⏰ \d+ reminder\(s\) set/i,
-  /^_?💡 \d+ idea\(s\) captured/i,
-  /^_?🧠 \d+ memory update\(s\)/i,
-  /^unknown command:/i,
-  /^❌ usage:/i,
-  /^⚠️ all ai providers are currently down/i,
-  /i(?:'| a)m not going to engage in this conversation anymore/i,
-  /^end of conversation/i,
-  /^🔴 .*test message/i,
-];
+
 const GREETING_ONLY_PATTERN = /^(hi|hii+|hello+|helloo+|hey+|heyy+|yo+|sup+|hola+|good (morning|afternoon|evening)|what'?s up|whats up|how are you)\W*$/i;
 const RESPONSE_GUARDRAILS = `NON-NEGOTIABLE RESPONSE RULES:
 - Follow explicit user instructions first (especially reset/delete/clear requests).
@@ -39,10 +25,6 @@ const RESPONSE_GUARDRAILS = `NON-NEGOTIABLE RESPONSE RULES:
 - Keep the tone natural and collaborative; avoid robotic scripts and repeated fallback wording.
 - Before finalizing your answer, self-check for contradiction with the latest user message and fix it.
 - If unsure, ask one clarifying question instead of guessing.`;
-const MEANINGFUL_HINTS = [
-  'task', 'remind', 'deadline', 'due', 'exam', 'project',
-  'meeting', 'decide', 'decision', 'priority', 'plan', 'commit',
-];
 
 async function rerankKnowledgeSemantically(userMessage, candidates) {
   if (!candidates || candidates.length <= 1) return (candidates || []).slice(0, 5);
@@ -83,6 +65,13 @@ ${candidateText}`);
 }
 
 async function fetchRelevantKnowledge(userMessage, keywords) {
+  // Use cache to avoid redundant LLM semantic reranking calls (5 min TTL)
+  // Cache key: normalized message + sorted keywords to prevent redundant LLM calls during tool loop or repeated messages
+  const normalizedMsg = userMessage.trim().toLowerCase().replace(/\s+/g, ' ');
+  const cacheKey = `knowledge:${normalizedMsg}:${[...keywords].sort().join(',')}`;
+  const cached = getCache(cacheKey);
+  if (cached) return cached;
+
   const ftsQuery = keywords.join(' | ');
   const baseQuery = supabase
     .from('knowledge_base')
@@ -90,86 +79,45 @@ async function fetchRelevantKnowledge(userMessage, keywords) {
     .order('created_at', { ascending: false })
     .limit(12);
 
+  let results = [];
   const { data: ftsRows, error: ftsError } = await baseQuery
     .textSearch('fts', ftsQuery, { type: 'plain', config: 'english' });
 
   if (!ftsError) {
-    return rerankKnowledgeSemantically(userMessage, ftsRows || []);
+    results = await rerankKnowledgeSemantically(userMessage, ftsRows || []);
+  } else {
+    const message = (ftsError.message || '').toLowerCase();
+    const isMissingFts = ftsError.code === '42703' || message.includes('fts');
+
+    if (!isMissingFts) {
+      console.error('[Context] knowledge FTS query failed:', ftsError.message);
+    } else {
+      if (!hasWarnedMissingKnowledgeFts) {
+        console.warn('[Context] knowledge_base.fts missing; falling back to keyword ILIKE search.');
+        hasWarnedMissingKnowledgeFts = true;
+      }
+
+      const fallbackFilter = keywords
+        .map(k => `content.ilike.%${k.replace(/,/g, ' ')}%`)
+        .join(',');
+
+      const { data: fallbackRows, error: fallbackError } = await supabase
+        .from('knowledge_base')
+        .select('content, source, created_at')
+        .or(fallbackFilter)
+        .order('created_at', { ascending: false })
+        .limit(12);
+
+      if (!fallbackError) {
+        results = await rerankKnowledgeSemantically(userMessage, fallbackRows || []);
+      } else {
+        console.error('[Context] knowledge fallback query failed:', fallbackError.message);
+      }
+    }
   }
 
-  const message = (ftsError.message || '').toLowerCase();
-  const isMissingFts = ftsError.code === '42703' || message.includes('fts');
-  if (!isMissingFts) {
-    console.error('[Context] knowledge FTS query failed:', ftsError.message);
-    return [];
-  }
-
-  if (!hasWarnedMissingKnowledgeFts) {
-    console.warn('[Context] knowledge_base.fts missing; falling back to keyword ILIKE search.');
-    hasWarnedMissingKnowledgeFts = true;
-  }
-
-  const fallbackFilter = keywords
-    .map(k => `content.ilike.%${k.replace(/,/g, ' ')}%`)
-    .join(',');
-
-  const { data: fallbackRows, error: fallbackError } = await supabase
-    .from('knowledge_base')
-    .select('content, source, created_at')
-    .or(fallbackFilter)
-    .order('created_at', { ascending: false })
-    .limit(12);
-
-  if (fallbackError) {
-    console.error('[Context] knowledge fallback query failed:', fallbackError.message);
-    return [];
-  }
-
-  return rerankKnowledgeSemantically(userMessage, fallbackRows || []);
-}
-
-function compressVerboseContent(content = '') {
-  const text = content.replace(/\s+/g, ' ').trim();
-  if (!text) return '';
-
-  if (text.startsWith('[Image analysis]')) {
-    return `[image summary] ${text.replace('[Image analysis]', '').trim().slice(0, 180)}...`;
-  }
-  if (text.startsWith('[Document:')) {
-    const title = text.slice(0, text.indexOf(']') + 1);
-    const body = text.slice(text.indexOf(']') + 1).trim();
-    return `${title} ${body.slice(0, 160)}...`;
-  }
-  if (text.includes('[URL content from')) {
-    const start = text.indexOf('[URL content from');
-    const end = text.indexOf(']', start);
-    const label = end > start ? text.slice(start, end + 1) : '[URL content]';
-    return `${label} ${text.slice(0, 130)}...`;
-  }
-  if (text.length > 550) {
-    return `${text.slice(0, 220)}...`;
-  }
-  return text;
-}
-
-function scoreEpisodeForContext(episode) {
-  const text = (episode.content || '').toLowerCase();
-  let score = episode.role === 'user' ? 2 : 1;
-  if (text.length < 24) score -= 1;
-  if (text.startsWith('[image analysis]') || text.startsWith('[document:') || text.includes('[url content from')) {
-    score -= 2;
-  }
-  for (const hint of MEANINGFUL_HINTS) {
-    if (text.includes(hint)) score += 1;
-  }
-  return score;
-}
-
-function isContextNoiseEpisode(episode) {
-  if (!episode || !episode.content) return true;
-  const text = (episode.content || '').replace(/\s+/g, ' ').trim();
-  if (!text) return true;
-  return CONTEXT_NOISE_PATTERNS.some((pattern) => pattern.test(text));
+  setCache(cacheKey, results, TTL_5MIN);
+  return results;
 }
 
 function isGreetingOnlyMessage(message = '') {
@@ -181,51 +129,13 @@ function isGreetingOnlyMessage(message = '') {
   return GREETING_ONLY_PATTERN.test(text);
 }
 
-function selectConversationLines(episodes = []) {
-  if (!episodes.length) return [];
-
-  const ordered = [...episodes].sort(
-    (a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()
-  );
-
-  let sessionStart = ordered.length - 1;
-  for (let i = ordered.length - 1; i > 0; i--) {
-    const cur = new Date(ordered[i].created_at || 0).getTime();
-    const prev = new Date(ordered[i - 1].created_at || 0).getTime();
-    if (!cur || !prev || Number.isNaN(cur) || Number.isNaN(prev)) continue;
-    if ((cur - prev) > SESSION_BREAK_MS) break;
-    sessionStart = i - 1;
-  }
-
-  const background = ordered.slice(0, sessionStart);
-  const currentSession = ordered.slice(sessionStart);
-
-  const selectedBackground = background
-    .map(ep => ({ ep, score: scoreEpisodeForContext(ep) }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, BACKGROUND_EPISODE_LIMIT)
-    .map(x => x.ep)
-    .sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
-
-  const lines = [];
-  for (const ep of selectedBackground) {
-    if (isContextNoiseEpisode(ep)) continue;
-    lines.push(`[${ep.role}] ${compressVerboseContent(ep.content)}`);
-  }
-  for (const ep of currentSession) {
-    if (isContextNoiseEpisode(ep)) continue;
-    lines.push(`[${ep.role}] ${(ep.content || '').replace(/\s+/g, ' ').trim()}`);
-  }
-  return lines;
-}
-
 /**
  * Build the full dynamic context for the AI brain.
  * Called before every Groq API call to inject current state.
  * @param {string} [userMessage] - Optional current message for knowledge_base FTS search
  * @returns {Promise<string>} Formatted context string
  */
-async function buildContext(userMessage = '') {
+export async function buildContext(userMessage = '') {
   const sections = [];
   const now = new Date();
   const greetingOnly = isGreetingOnlyMessage(userMessage);
@@ -237,14 +147,13 @@ async function buildContext(userMessage = '') {
   const cachedCore    = getCache('core_memory');
   const cachedPatterns = getCache('patterns');
   const cachedIdeas   = getCache('ideas');
+  const cachedWorking = getCache('working_memory');
 
   const promises = [
-    // Always fresh: episodic memory window for smart context selection
-    supabase.from('episodic_memory').select('role, content, created_at').order('created_at', { ascending: false }).limit(EPISODE_FETCH_LIMIT),
     // Always fresh: open tasks
     supabase.from('tasks').select('id, title, description, deadline, priority, status, follow_up_count, tier').in('status', ['open', 'snoozed']).order('priority', { ascending: true }),
-    // Cached 1 min: working memory
-    supabase.from('working_memory').select('key, value, expires_at').or(`expires_at.is.null,expires_at.gt.${now.toISOString()}`),
+    // Cached 1 min: working memory to reduce redundant database calls
+    cachedWorking ? Promise.resolve({ data: cachedWorking }) : supabase.from('working_memory').select('key, value, expires_at').or(`expires_at.is.null,expires_at.gt.${now.toISOString()}`),
     // Cached 5 min: core memory
     cachedCore    ? Promise.resolve({ data: cachedCore })    : supabase.from('core_memory').select('key, value').order('key'),
     // Cached 5 min: patterns
@@ -254,7 +163,6 @@ async function buildContext(userMessage = '') {
   ];
 
   const [
-    { data: episodes },
     { data: tasks },
     { data: workingMemory },
     { data: coreMemory },
@@ -263,9 +171,10 @@ async function buildContext(userMessage = '') {
   ] = await Promise.all(promises);
 
   // Update caches for slow-changing data
-  if (!cachedCore     && coreMemory)  setCache('core_memory', coreMemory,  TTL_5MIN);
-  if (!cachedPatterns && patterns)    setCache('patterns',    patterns,     TTL_5MIN);
-  if (!cachedIdeas    && ideas)       setCache('ideas',       ideas,        TTL_5MIN);
+  if (!cachedWorking  && workingMemory) setCache('working_memory', workingMemory, TTL_1MIN);
+  if (!cachedCore     && coreMemory)    setCache('core_memory',    coreMemory,    TTL_5MIN);
+  if (!cachedPatterns && patterns)      setCache('patterns',       patterns,       TTL_5MIN);
+  if (!cachedIdeas    && ideas)         setCache('ideas',          ideas,          TTL_5MIN);
 
   // (History is now handled via the messages array in the chat completion call to prevent redundancy)
 
