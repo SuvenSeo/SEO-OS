@@ -11,8 +11,11 @@ export function requireAuth(request) {
   const secret = process.env.CRON_SECRET || process.env.NEXT_PUBLIC_CRON_SECRET || '';
 
   if (!secret) {
-    console.warn('[Auth] No CRON_SECRET configured — allowing request');
-    return null;
+    console.error('[Auth] CRON_SECRET not configured — failing closed');
+    return NextResponse.json(
+      { error: 'Server configuration error' },
+      { status: 500 }
+    );
   }
 
   if (token === secret) {
